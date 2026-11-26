@@ -161,6 +161,46 @@ module tb_kosmos_v03_physics_gate;
         end
     endtask
 
+    task automatic check_revoked_open(input [7:0] blocked_verdict);
+        begin
+            @(negedge clk);
+            por_rst_n = 1'b0;
+            set_clean_open_defaults();
+            @(negedge clk);
+            por_rst_n = 1'b1;
+            rail_p = 4'b0001;
+            rail_n = 4'b1110;
+
+            @(posedge clk); // T1
+            #1;
+            if (lock_state !== 2'd1 || act_enable_p !== 1'b0 || act_enable_n !== 1'b1)
+                $fatal(1, "T1 did not arm with actuator off for verdict %h", blocked_verdict);
+
+            rail_p = 4'b0000;
+            rail_n = 4'b1111;
+            case (blocked_verdict)
+                8'h3C: energy_rem_2x = 64'd0; // HOLD
+                8'h5A: force_in = 32'sd101;   // TRAP
+                8'h00: dt_ticks = 32'd0;     // KILL
+            endcase
+            #1;
+            if (comb_verdict !== blocked_verdict)
+                $fatal(1, "Expected revocation verdict %h, got %h", blocked_verdict, comb_verdict);
+
+            @(posedge clk); // T2
+            #1;
+            if (act_enable_p !== 1'b0 || act_enable_n !== 1'b1 || verdict_code !== blocked_verdict)
+                $fatal(1, "T2 did not block actuation for verdict %h", blocked_verdict);
+
+            // Restoring physics inputs cannot reissue the consumed authorization.
+            set_clean_open_defaults();
+            @(posedge clk);
+            #1;
+            if (act_enable_p !== 1'b0 || act_enable_n !== 1'b1)
+                $fatal(1, "Stale authorization fired after verdict %h cleared", blocked_verdict);
+        end
+    endtask
+
     reg [1023:0] vec_path;
     reg [1023:0] out_path;
     integer      fd_in;
@@ -216,6 +256,11 @@ module tb_kosmos_v03_physics_gate;
         #1;
         if (act_enable_p !== 1'b1 || verdict_code !== 8'hA5)
             fail_now("T2 failed to fire pulse");
+
+        check_revoked_open(8'h3C);
+        check_revoked_open(8'h5A);
+        check_revoked_open(8'h00);
+        $display("[PASS] T2 blocked for HOLD, TRAP, and KILL after T1.");
 
         // 3. Optional external vector parity streaming for C11 <-> RTL XOR == 0 proof
         if ($value$plusargs("VEC_FILE=%s", vec_path) &&
