@@ -20,7 +20,7 @@ Dette er en digital modell. Måling av flytid, kutt og varme hører til L3 HOLD.
   oppgir separat hvor mange logiske biter som faktisk skal slettes. Summene
   for kappinger og bitantall har hver sin uint64-grense. For oppgitt konstant
   temperatur T i millikelvin er den formelle Landauer-nedre grensen
-  Q_min = N_bits * (1380649/10^32) * (T/1000) * ln(2) joule.
+  Q_min = N_bits * (1380649/10^29) * (T/1000) * ln(2) joule.
   Uttrykket lagres som heltallsfaktorer med ln(2) beholdt symbolsk. En
   kappet fremtidsgren står for et valg i historikkmodellen. Det kreves et
   eget slettingsregnskap for å knytte kappingen til et fysisk bitantall.
