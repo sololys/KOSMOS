@@ -1,0 +1,27 @@
+# KOSMOS — Arkitekturmanifest (Karbor-utgave v0.1)
+
+$$\mathfrak{K} = \bigl(E,\; B,\; \omega,\; J,\; \mathcal{A},\; \mathcal{C}_4,\; \Omega\bigr)$$
+
+Dette manifestet fastsetter hva som ble beholdt fra utkast I og II, og hvilke fem hull som ble skåret bort og herdet under sammensmiingen til kjørbar C11 og SystemVerilog RTL.
+
+---
+
+## 1. De fem Karbor-rettelsene over Kandidat II
+
+| Punkt | Hull i tidligere utkast | Herdet løsning i `KOSMOS` v0.1 |
+| :--- | :--- | :--- |
+| **1. Toerkomplement-fellen i $J$** | I 64-bits heltall gir $-(\text{INT64\_MIN})$ udefinert oppførsel (UB) og bryter $J(J(z)) = z$. | `INT64_MIN` gjerdes ut som `KOSMOS_POISON_MIN`. Faserommet hviler på det eksakt symmetriske gitteret $[-M, +M]^6$ ($M = 2^{63}-1$), med 128-bits verifikasjon av $J^*\omega = -\omega$. |
+| **2. Divisjon og $\mathbb{R}$ i $L^\infty\text{-veggen}$** | Normalisering $g_i(x) = (x_i - r_i)/\tau_i$ krever enten flyttall eller heltallsdivisjon som runder av `15/10` ned til `1`. | Divisjonsfri, fortegnssikker avstand i offset-binær `uint64_t`: $\lvert x_i - r_i \rvert \le \tau_i$ med krav $\tau_i > 0$. |
+| **3. Kandidat-avslag mot anleggs-`KILL`** | Ethvert avvik $\lVert g(x) \rVert_\infty > 1$ utløste `KILL`, slik at utforskning av dristige kandidater i `HOLD` ville låst maskinen. | Streng deling mellom $\mathcal{A}_{\text{cand}}$ (avviser forslaget til `HOLD` med $u = 0$) og $\mathcal{A}_{\text{hard}}$ (låser `KILL` ved faktisk grensebrudd). |
+| **4. Vitnekonflikt i $\{0, ?, 1\}$** | Når vitne $w_1$ melder `1` og vitne $w_2$ melder `0`, mangler treverdig tabell et eget tegn for selvmotsigelse. | Chu-evalueringen løftes til Belnap–Dunn $\mathcal{FOUR} = \{\bot, \mathsf{F}, \mathsf{T}, \top\}$ (`0b00..0b11`) paret med sømkontroll $\Delta_{\text{seam}} = 0$ fra sløyferommet. Konflikt gir øyeblikkelig `KILL`. |
+| **5. Mellomtilstand mellom `OPEN` og `REALIZED`** | Kravet `OPEN != REALIZED` manglet en eksplisitt tilstandslås mens handlingen er under utførelse. | To-takts tilstandsmaskin (`HOLD -> IN_FLIGHT -> HOLD / UNRESOLVED / KILL`) med kryptografisk binding mellom `pre_hash` og `W_POST`. |
+
+---
+
+## 2. Grunnlovene i granitt
+
+1. **Involusjon og antisymplektisk speil:** $J(q, p) = (q, -p)$ oppfyller $J^2 = I$ og $J^*\omega = -\omega$ på hele $[-M, +M]^6$.
+2. **Topologisk frakobling:** Enhver kontinuerlig bane $\gamma : [0, 1] \to E$ oppfyller $\pi \circ \gamma = \text{konstant}$.
+3. **Enveis aktuering:** $u_{\text{out}} \neq 0 \implies (\text{dom} = \text{OPEN} \land x \in \mathcal{A}_{\text{hard}} \cap \mathcal{A}_{\text{cand}} \land r(x, W_{\mathrm{PRE}}) = \mathsf{T} \land \Delta_{\text{seam}} = 0)$, aldri $\iff$.
+4. **Monoton prefikshistorikk:** $h_{n+1} = h_n \parallel e_n$ med strengt krympende Cantor-sylinder $C_{h_{n+1}} \subsetneq C_{h_n}$ og uforanderlig SHA-256-kjede.
+5. **Suveren tilbakestilling (`Level 01`):** `KILL` og `UNRESOLVED` kan ikke slettes av programvare; autorisert `Level 01`-gjenoppretting forlenger historikken med en ny hendelse (`EVT_L01_RECOVERY`) og fører kammeret tilbake til `HOLD` ($0.00\text{ V}$).
