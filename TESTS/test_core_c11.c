@@ -5,11 +5,15 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+#define _POSIX_C_SOURCE 200809L
+
 #include "kosmos_space.h"
+#include "kosmos_v02.h"
 #include "kosmos_sha256.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #define ASSERT_TRUE(cond, msg)                                                   \
     do {                                                                         \
@@ -175,10 +179,91 @@ static void test_end_to_end_gate_invariants(void) {
     ASSERT_TRUE(kosmos_history_verify_chain(&gate.history) == KOSMOS_OK, "SHA-256 chain invalid");
 }
 
+static void test_v02_cold_boot_and_hmac(void) {
+    /* RFC 4231 Test Case 2: key = "Jefe", data = "what do ya want for nothing?" */
+    static const uint8_t rfc_key[4] = { 'J', 'e', 'f', 'e' };
+    static const uint8_t rfc_msg[28] = {
+        'w','h','a','t',' ','d','o',' ','y','a',' ','w','a','n','t',' ',
+        'f','o','r',' ','n','o','t','h','i','n','g','?'
+    };
+    static const uint8_t rfc_expected[32] = {
+        0x5bu, 0xdcu, 0xc1u, 0x46u, 0xbfu, 0x60u, 0x75u, 0x4eu,
+        0x6au, 0x04u, 0x24u, 0x26u, 0x08u, 0x95u, 0x75u, 0xc7u,
+        0x5au, 0x00u, 0x3fu, 0x08u, 0x9du, 0x27u, 0x39u, 0x83u,
+        0x9du, 0xecu, 0x58u, 0xb9u, 0x64u, 0xecu, 0x38u, 0x43u
+    };
+    uint8_t mac[32];
+    char wal_path[] = "/tmp/kosmos_c11_wal_XXXXXX";
+    int fd;
+    kosmos_linf_box_t box;
+    kosmos_gate_t g_before;
+    kosmos_gate_t g_reboot;
+    int64_t hard_ok[KOSMOS_GUARD_DIM] = { 0, 0, 0, 0, 0, 0 };
+    kosmos_phase_t z = { { { 1, 2, 3 } }, { { 4, 5, 6 } } };
+    kosmos_ctrl_t u = { { 20, 0, 0 } };
+    kosmos_ctrl_t u_out;
+    uint8_t verdict = 0u;
+    uint8_t had_unres = 0u;
+    kosmos_ledger_entry_t rec_pre;
+    kosmos_witness_pre_t w_pre;
+    uint8_t l01_key[32];
+    uint8_t sig[32];
+    uint32_t i;
+
+    kosmos_hmac_sha256(rfc_key, 4u, rfc_msg, 28u, mac);
+    ASSERT_TRUE(memcmp(mac, rfc_expected, 32u) == 0, "RFC 4231 HMAC-SHA256 vector mismatch");
+
+    fd = mkstemp(wal_path);
+    ASSERT_TRUE(fd >= 0, "mkstemp failed");
+    (void)close(fd);
+    (void)unlink(wal_path);
+
+    memset(&box, 0, sizeof(box));
+    box.count = 6u;
+    for (i = 0u; i < 6u; ++i) {
+        box.tol[i] = 1000;
+    }
+
+    ASSERT_TRUE(kosmos_gate_cold_boot(&g_before, wal_path, &box, &box, 1u, 10u, &had_unres, NULL) == KOSMOS_OK,
+                "initial cold boot failed");
+    ASSERT_TRUE(had_unres == 0u && g_before.state == (uint32_t)KOSMOS_STATE_HOLD, "initial state not HOLD");
+
+    memset(&w_pre, 0, sizeof(w_pre));
+    w_pre.witness_id = 0x99887766ULL;
+    w_pre.auth_nonce = 7u;
+    w_pre.cycle = 11u;
+    w_pre.witness_count = 1u;
+    w_pre.chu_rows[0] = (uint8_t)KOSMOS_CHU_VERIFIED;
+
+    ASSERT_TRUE(kosmos_wal_authorize(&g_before, wal_path, hard_ok, &z, &u, &w_pre, &u_out, &verdict) == KOSMOS_OK,
+                "wal_authorize failed");
+    ASSERT_TRUE(verdict == KOSMOS_VERDICT_OPEN, "expected OPEN");
+
+    /* Simulate total RAM loss before W_POST: wipe g_before and cold-boot fresh g_reboot */
+    memset(&g_before, 0, sizeof(g_before));
+    ASSERT_TRUE(kosmos_gate_cold_boot(&g_reboot, wal_path, &box, &box, 1u, 50u, &had_unres, &rec_pre) == KOSMOS_OK,
+                "post-cut cold boot failed");
+    ASSERT_TRUE(had_unres == 1u, "cold boot missed unresolved PRE");
+    ASSERT_TRUE(rec_pre.witness_id == 0x99887766ULL, "recovered PRE witness mismatch");
+    ASSERT_TRUE(g_reboot.state == (uint32_t)KOSMOS_STATE_UNRESOLVED, "cold boot not in UNRESOLVED");
+    ASSERT_TRUE(g_reboot.last_nonce == 7u, "last_nonce lost across cold boot");
+
+    /* Sign challenge-bound L01 recovery and verify history grows */
+    memset(l01_key, 0x5Au, sizeof(l01_key));
+    kosmos_l01_sign_challenge(l01_key, g_reboot.history.head_hash, 51u, g_reboot.state, sig);
+    ASSERT_TRUE(kosmos_wal_l01_recover_signed(&g_reboot, wal_path, l01_key, sig, 51u, &verdict) == KOSMOS_OK,
+                "signed L01 recovery failed");
+    ASSERT_TRUE(g_reboot.state == (uint32_t)KOSMOS_STATE_HOLD && g_reboot.history.len == 4u,
+                "signed recovery did not restore HOLD and extend history");
+
+    (void)unlink(wal_path);
+}
+
 int main(void) {
     test_sha256_fips_vectors();
     test_affine_and_antisymplectic_mirror();
     test_end_to_end_gate_invariants();
-    printf("[PASS] C11 core + ASan/UBSan suite verified.\n");
+    test_v02_cold_boot_and_hmac();
+    printf("[PASS] C11 v0.2 core + WAL cold-boot + ASan/UBSan suite verified.\n");
     return 0;
 }

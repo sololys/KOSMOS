@@ -19,7 +19,11 @@ KOSMOS_POISON_MIN = -(1 << 63)
 
 KOSMOS_VERDICT_KILL = 0x00
 KOSMOS_VERDICT_HOLD = 0x3C
+KOSMOS_VERDICT_TRAP = 0x5A
 KOSMOS_VERDICT_OPEN = 0xA5
+
+KOSMOS_CHANNEL_COUNT = 1024
+KOSMOS_MAX_DEGREE = 4
 
 KOSMOS_L01_KEY_MAGIC = 0x4B4F534D4F533031
 
@@ -139,6 +143,58 @@ class KosmosGate(ctypes.Structure):
         ("cand_box", KosmosLinfBox),
         ("active_u", KosmosCtrl),
         ("history", KosmosHistory),
+    ]
+
+
+class KosmosU128(ctypes.Structure):
+    _fields_ = [("lo", ctypes.c_uint64), ("hi", ctypes.c_uint64)]
+
+
+class KosmosChannelSlot(ctypes.Structure):
+    _fields_ = [
+        ("verdict", ctypes.c_uint8),
+        ("degree", ctypes.c_uint8),
+        ("neighbors", ctypes.c_uint16 * KOSMOS_MAX_DEGREE),
+        ("last_nonce", ctypes.c_uint64),
+        ("out_u", ctypes.c_int64),
+        ("trap_count", ctypes.c_uint32),
+        ("open_count", ctypes.c_uint32),
+    ]
+
+
+class KosmosChannelBank(ctypes.Structure):
+    _fields_ = [
+        ("global_kill", ctypes.c_uint8),
+        ("pad", ctypes.c_uint8 * 7),
+        ("hard_limit", ctypes.c_int64),
+        ("cand_limit", ctypes.c_int64),
+        ("slots", KosmosChannelSlot * KOSMOS_CHANNEL_COUNT),
+    ]
+
+
+class KosmosTdcWindow(ctypes.Structure):
+    _fields_ = [
+        ("tau_min_ps", ctypes.c_uint64),
+        ("tau_max_ps", ctypes.c_uint64),
+        ("cal_uncert_ps", ctypes.c_uint64),
+    ]
+
+
+class KosmosCornerGuard(ctypes.Structure):
+    _fields_ = [
+        ("ref", ctypes.c_int64 * KOSMOS_DIM),
+        ("weight", ctypes.c_uint64 * KOSMOS_DIM),
+        ("max_energy_sq", KosmosU128),
+    ]
+
+
+class KosmosLandauerLedger(ctypes.Structure):
+    _fields_ = [
+        ("pruned_branches", ctypes.c_uint64),
+        ("erased_bits_min", ctypes.c_uint64),
+        ("ebit_zepto_joule_milli", ctypes.c_uint64),
+        ("logical_min_milli_zj", KosmosU128),
+        ("budget_milli_zj", KosmosU128),
     ]
 
 
@@ -288,5 +344,133 @@ def load_kosmos() -> ctypes.CDLL:
         ctypes.POINTER(ctypes.c_uint8),
     ]
     lib.kosmos_gate_l01_recover.restype = ctypes.c_int
+
+    # --- v0.2 bindings ---
+    lib.kosmos_sizeof_channel_bank.argtypes = []
+    lib.kosmos_sizeof_channel_bank.restype = ctypes.c_size_t
+    assert (
+        ctypes.sizeof(KosmosChannelBank) == lib.kosmos_sizeof_channel_bank()
+    ), "ABI size mismatch: KosmosChannelBank"
+
+    lib.kosmos_l01_sign_challenge.argtypes = [
+        ctypes.POINTER(ctypes.c_uint8),
+        ctypes.POINTER(ctypes.c_uint8),
+        ctypes.c_uint64,
+        ctypes.c_uint32,
+        ctypes.POINTER(ctypes.c_uint8),
+    ]
+    lib.kosmos_l01_sign_challenge.restype = None
+
+    lib.kosmos_gate_cold_boot.argtypes = [
+        ctypes.POINTER(KosmosGate),
+        ctypes.c_char_p,
+        ctypes.POINTER(KosmosLinfBox),
+        ctypes.POINTER(KosmosLinfBox),
+        ctypes.c_uint32,
+        ctypes.c_uint64,
+        ctypes.POINTER(ctypes.c_uint8),
+        ctypes.POINTER(KosmosLedgerEntry),
+    ]
+    lib.kosmos_gate_cold_boot.restype = ctypes.c_int
+
+    lib.kosmos_wal_authorize.argtypes = [
+        ctypes.POINTER(KosmosGate),
+        ctypes.c_char_p,
+        ctypes.POINTER(ctypes.c_int64),
+        ctypes.POINTER(KosmosPhase),
+        ctypes.POINTER(KosmosCtrl),
+        ctypes.POINTER(KosmosWitnessPre),
+        ctypes.POINTER(KosmosCtrl),
+        ctypes.POINTER(ctypes.c_uint8),
+    ]
+    lib.kosmos_wal_authorize.restype = ctypes.c_int
+
+    lib.kosmos_wal_confirm_post.argtypes = [
+        ctypes.POINTER(KosmosGate),
+        ctypes.c_char_p,
+        ctypes.POINTER(KosmosWitnessPost),
+        ctypes.POINTER(ctypes.c_uint8),
+    ]
+    lib.kosmos_wal_confirm_post.restype = ctypes.c_int
+
+    lib.kosmos_wal_l01_recover_signed.argtypes = [
+        ctypes.POINTER(KosmosGate),
+        ctypes.c_char_p,
+        ctypes.POINTER(ctypes.c_uint8),
+        ctypes.POINTER(ctypes.c_uint8),
+        ctypes.c_uint64,
+        ctypes.POINTER(ctypes.c_uint8),
+    ]
+    lib.kosmos_wal_l01_recover_signed.restype = ctypes.c_int
+
+    lib.kosmos_channel_bank_init.argtypes = [
+        ctypes.POINTER(KosmosChannelBank),
+        ctypes.c_int64,
+        ctypes.c_int64,
+    ]
+    lib.kosmos_channel_bank_init.restype = ctypes.c_int
+
+    lib.kosmos_channel_set_neighbors.argtypes = [
+        ctypes.POINTER(KosmosChannelBank),
+        ctypes.c_uint32,
+        ctypes.POINTER(ctypes.c_uint16),
+        ctypes.c_uint32,
+    ]
+    lib.kosmos_channel_set_neighbors.restype = ctypes.c_int
+
+    lib.kosmos_channel_step.argtypes = [
+        ctypes.POINTER(KosmosChannelBank),
+        ctypes.c_uint32,
+        ctypes.c_int64,
+        ctypes.c_int64,
+        ctypes.c_uint64,
+        ctypes.c_uint8,
+        ctypes.c_uint8,
+        ctypes.POINTER(ctypes.c_int64),
+        ctypes.POINTER(ctypes.c_uint8),
+    ]
+    lib.kosmos_channel_step.restype = ctypes.c_int
+
+    lib.kosmos_tdc_check.argtypes = [
+        ctypes.POINTER(KosmosTdcWindow),
+        ctypes.c_uint64,
+        ctypes.POINTER(ctypes.c_uint8),
+    ]
+    lib.kosmos_tdc_check.restype = ctypes.c_int
+
+    lib.kosmos_tdc_gated_authorize.argtypes = [
+        ctypes.POINTER(KosmosGate),
+        ctypes.POINTER(KosmosTdcWindow),
+        ctypes.c_uint64,
+        ctypes.POINTER(ctypes.c_int64),
+        ctypes.POINTER(KosmosPhase),
+        ctypes.POINTER(KosmosCtrl),
+        ctypes.POINTER(KosmosWitnessPre),
+        ctypes.POINTER(KosmosCtrl),
+        ctypes.POINTER(ctypes.c_uint8),
+    ]
+    lib.kosmos_tdc_gated_authorize.restype = ctypes.c_int
+
+    lib.kosmos_corner_guard_eval.argtypes = [
+        ctypes.POINTER(KosmosCornerGuard),
+        ctypes.POINTER(ctypes.c_int64),
+        ctypes.POINTER(ctypes.c_uint8),
+        ctypes.POINTER(KosmosU128),
+    ]
+    lib.kosmos_corner_guard_eval.restype = ctypes.c_int
+
+    lib.kosmos_landauer_init.argtypes = [
+        ctypes.POINTER(KosmosLandauerLedger),
+        ctypes.c_uint64,
+        KosmosU128,
+    ]
+    lib.kosmos_landauer_init.restype = ctypes.c_int
+
+    lib.kosmos_landauer_record_prune.argtypes = [
+        ctypes.POINTER(KosmosLandauerLedger),
+        ctypes.c_uint64,
+        ctypes.POINTER(ctypes.c_uint8),
+    ]
+    lib.kosmos_landauer_record_prune.restype = ctypes.c_int
 
     return lib

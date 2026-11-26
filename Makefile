@@ -1,21 +1,25 @@
 # KOSMOS — Symplectic Witness-Gated Realization Space (0 float, 0 external deps)
 .PHONY: all verify c11 rtl py surface manifest clean
 
-CC      := gcc
-CFLAGS  := -std=c11 -O2 -Wall -Wextra -Werror -pedantic -Wconversion -Wsign-conversion
-SAN     := -fsanitize=address,undefined
+CC       := gcc
+CFLAGS   := -std=c11 -O2 -Wall -Wextra -Werror -pedantic -Wconversion -Wsign-conversion
+SAN      := -fsanitize=address,undefined
 CORE_SRC := CORE/kosmos_sha256.c \
             CORE/kosmos_mirror.c \
             CORE/kosmos_boundary.c \
             CORE/kosmos_history.c \
-            CORE/kosmos_gate.c
+            CORE/kosmos_gate.c \
+            CORE/kosmos_wal.c \
+            CORE/kosmos_channel_sluice.c \
+            CORE/kosmos_tdc_window.c \
+            CORE/kosmos_energy_128.c
 
 all: verify
 
 verify: c11 rtl py surface
-	@echo "[PASS] KOSMOS granite verification 100% green (C11 + ASan/UBSan + RTL + Yosys + Python + Manifest)."
+	@echo "[PASS] KOSMOS v0.2 granite verification 100% green (C11 + ASan/UBSan + Dual-RTL + Yosys + Python + Manifest)."
 
-build/libkosmos.so: $(CORE_SRC) CORE/kosmos_space.h CORE/kosmos_sha256.h
+build/libkosmos.so: $(CORE_SRC) CORE/kosmos_space.h CORE/kosmos_v02.h CORE/kosmos_sha256.h
 	@mkdir -p build
 	$(CC) $(CFLAGS) -fPIC -shared $(CORE_SRC) -ICORE -o build/libkosmos.so
 
@@ -28,8 +32,10 @@ rtl:
 	@mkdir -p build
 	iverilog -g2012 -Wall -o build/tb_kosmos_gate.vvp RTL/kosmos_gate.sv RTL/tb_kosmos_gate.sv
 	vvp build/tb_kosmos_gate.vvp
-	yosys -q -p "read_verilog -sv RTL/kosmos_gate.sv; proc; opt; check -assert; stat"
-	@echo "[PASS] Yosys synthesis check clean (0 latches, 0 errors)."
+	iverilog -g2012 -Wall -o build/tb_kosmos_dual_rail_gate.vvp RTL/kosmos_dual_rail_gate.sv RTL/tb_kosmos_dual_rail_gate.sv
+	vvp build/tb_kosmos_dual_rail_gate.vvp
+	yosys -q -p "read_verilog -sv RTL/kosmos_gate.sv RTL/kosmos_dual_rail_gate.sv; proc; opt; check -assert; stat"
+	@echo "[PASS] Yosys synthesis check clean on both RTL gates (0 latches, 0 errors)."
 
 py: build/libkosmos.so
 	python3 -B TESTS/test_involution.py
@@ -37,6 +43,7 @@ py: build/libkosmos.so
 	python3 -B TESTS/test_witness.py
 	python3 -B TESTS/test_prefix.py
 	python3 -B TESTS/test_no_unauthorized_commit.py
+	python3 -B TESTS/test_v02_extensions.py
 
 manifest:
 	python3 -B TESTS/verify_surface.py --write-manifest

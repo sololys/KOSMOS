@@ -18,7 +18,19 @@ Dette manifestet fastsetter hva som ble beholdt fra utkast I og II, og hvilke fe
 
 ---
 
-## 2. Grunnlovene i granitt
+## 2. Påbygg i `v0.2` etter kaldstart- og benkrevisjon
+
+| Modul | Bruddflate som tettes | Verifisert mekanisme (`L1` C11 + RTL) |
+| :--- | :--- | :--- |
+| **Kaldstart-WAL & Signert L01** | Strømbrudd med nullstilt RAM mellom `PRE` og `POST`, samt gjenbruk av statisk L01-nøkkel. | `fsync`-basert binær WAL (`kosmos_wal.c`) som starter rett i `UNRESOLVED` etter ufullført `PRE`, og engangs `HMAC-SHA256` over `(head_hash, cycle, state)`. |
+| **Lokalt endelig kanalgraf** | Én feilende kanal drar ned nabokanaler eller mangler isolert karantene. | 1 024 kanaler med $\deg(k) \le 4$ der lokalt avvik setter kun kanal $k$ i `TRAP` (`0x5A`, $u_k = 0$) i $O(1)$ tid. |
+| **Alexandrov-flytid (TDC)** | Pakker utenfor lyskjeglen eller ekko inne i vinduet uten eget vitne. | Heltallig pikosekundsjekk $[\tau_{\min} + \delta\tau_{\text{cal}}, \tau_{\max} - \delta\tau_{\text{cal}}]$ der ekko innenfor vinduet fortsatt krever Chu-vitne og fersk nonce. |
+| **128-bits hjørnevakt & Landauer** | Hjørnevektor $(80, 80, 10)$ passerer $L^\infty \le 100$, men sprenger $100^2 = 10\,000$. | Eksakt 128-bits heltallig kvadratsum uten rot eller divisjon, pluss eksplisitt logisk Landauer-nedregrense (`L1 != fysisk kalorimetri`). |
+| **Dual-rail & NVRAM-skygge** | Enkelttråds bitfeil (`0 -> 1`) og tap av `IN_FLIGHT` over varm reset i RTL. | Komplementære trådpar (`01`/`10`, mens `00`/`11` løser ut kombinatorisk `crowbar_trip`) og NVRAM-skygge som låser `STATE_UNRESOLVED` ved oppstart. |
+
+---
+
+## 3. Grunnlovene i granitt
 
 1. **Involusjon og antisymplektisk speil:** $J(q, p) = (q, -p)$ oppfyller $J^2 = I$ og $J^*\omega = -\omega$ på hele $[-M, +M]^6$.
 2. **Topologisk frakobling:** Enhver kontinuerlig bane $\gamma : [0, 1] \to E$ oppfyller $\pi \circ \gamma = \text{konstant}$.

@@ -81,7 +81,8 @@ Et punkt i kandidatrommet har fem koordinater $x = (h, q, p, u, s)$: historisk p
 1. **Kosmos-teoremet ($\pi \circ \gamma = \text{konstant}$):** Projeksjonen $\pi : E \to B$ gitt ved $\pi(h, q, p, u, s) = h$ er kontinuerlig mot et diskret, lokalt endelig basisrom $B$. Enhver kontinuerlig bane $\gamma : [0, 1] \to E$ tvinges dermed til å ligge i ett og samme historiske fiber. Ingen glatt deformasjon i `HOLD` kan snike seg over i en ny historisk hendelse; overgangen krever sluseoperasjonen $\Omega$.
 2. **Symmetrisk heltallsgitter uten toerkomplement-felle:** I vanlig 64-bits heltallsaritmetikk mangler `INT64_MIN` ($-2^{63}$) positiv motpart, slik at $-p$ gir udefinert oppførsel og bryter $J^2 = I$. **KOSMOS** gjerder ut `INT64_MIN` som ulovlig giftverdi (`KOSMOS_POISON_MIN`) og låser faserommet til det eksakt symmetriske gitteret $[-M, +M]^6$ ($M = 2^{63}-1$), der $J(J(z)) = z$ og $J^*\omega = -\omega$ holder bit-eksakt i 128-bits heltall.
 3. **Skille mellom kandidatavvisning (`HOLD`) og hard grense (`KILL`):** En vill idé inne i tenkerommet skal avvises til `HOLD` ($u = 0$), ikke sprenge hovedsikringen. Bare brudd på anleggets harde ramme $\mathcal{A}_{\text{hard}}$, motstridende vitner (`CONFLICT`), åpen sløyfesprekk ($\Delta_{\text{seam}} \neq 0$), repriseforsøk eller giftverdier utløser låst `KILL` ($0.00\text{ V}$).
-4. **To-takts realisering (`OPEN != REALIZED`):** Godkjent $W_{\mathrm{PRE}}$ gir dommen `OPEN` (`0xA5`) og flytter slusen til `IN_FLIGHT` med låst SHA-256-anker, men registrerer ingen fullført konsekvens før $W_{\mathrm{POST}}$ ankommer med eksakt samme anker. Uteblir $W_{\mathrm{POST}}$ ved strømbrudd eller tidsavbrudd, låses porten i `UNRESOLVED` med $u = 0$.
+4. **To-takts realisering (`OPEN != REALIZED`) og kaldstart-lås (`v0.2`):** Godkjent $W_{\mathrm{PRE}}$ gir dommen `OPEN` (`0xA5`), skriver binær WAL-post med `fsync()` og flytter slusen til `IN_FLIGHT`. Forsvinner strømmen før $W_{\mathrm{POST}}$, gjenoppstår porten ved kaldstart fra disk direkte i `UNRESOLVED` med $u = 0$, og gjenoppretting krever engangs `HMAC-SHA256`-signatur over gjeldende `head_hash`.
+5. **Kanalisolasjon, pikosekund-flytid, 128-bits hjørnevakt og dual-rail (`v0.2`):** 1 024 lokalt endelige kanaler ($\deg \le 4$) med isolert `TRAP` (`0x5A`), Alexandrov-tidsvindu $[\tau_{\min} + \delta\tau_{\text{cal}}, \tau_{\max} - \delta\tau_{\text{cal}}]$, rotfri 128-bits kulevakt som fanger hjørnefeller som $(80, 80, 10)$ mot $100^2$, og komplementær dual-rail SystemVerilog-sluse (`00`/`11` gir kombinatorisk `crowbar_trip`).
 
 ---
 
@@ -101,25 +102,35 @@ KOSMOS/
 |   |-- 03_BOUNDARY.md
 |   |-- 04_CHU_WITNESS.md
 |   |-- 05_OMEGA_GATE.md
-|   `-- 06_HISTORY.md
+|   |-- 06_HISTORY.md
+|   `-- 07_CHANNEL_CONE_ENERGY.md
 |-- CORE/
 |   |-- kosmos_space.h
+|   |-- kosmos_v02.h
 |   |-- kosmos_sha256.h
 |   |-- kosmos_sha256.c
 |   |-- kosmos_mirror.c
 |   |-- kosmos_boundary.c
 |   |-- kosmos_gate.c
-|   `-- kosmos_history.c
+|   |-- kosmos_history.c
+|   |-- kosmos_wal.c
+|   |-- kosmos_channel_sluice.c
+|   |-- kosmos_tdc_window.c
+|   `-- kosmos_energy_128.c
 |-- RTL/
 |   |-- kosmos_gate.sv
-|   `-- tb_kosmos_gate.sv
+|   |-- tb_kosmos_gate.sv
+|   |-- kosmos_dual_rail_gate.sv
+|   `-- tb_kosmos_dual_rail_gate.sv
 `-- TESTS/
+    |-- kosmos_ctypes.py
     |-- test_core_c11.c
     |-- test_involution.py
     |-- test_boundary.py
     |-- test_witness.py
     |-- test_prefix.py
     |-- test_no_unauthorized_commit.py
+    |-- test_v02_extensions.py
     `-- verify_surface.py
 ```
 
