@@ -9,9 +9,11 @@
 
 **KOSMOS** ($\mathfrak{K}$) er en deterministisk univers- og realiseringsmodell skåret ut i heltalls-C11 (`0 float`), SystemVerilog IEEE 1800-2012 RTL og verifiserbare bevistester. Modellen samler tre soner i én sammenhengende kropp: et vendbart tredimensjonalt symplektisk faserom i hvile (`HOLD`), en vitnebundet to-takts sluse ($\Omega$), og en uforanderlig, prefiks-ordnet historikk med SHA-256-kjede.
 
-* **Forfatter:** Marius Egerhei Torjusen (`ORCID: 0009-0006-0431-6637`)
-* **Lisens:** Apache-2.0
-* **Bevisgrense:** `L1 Deterministisk Programvare & Syntetiserbar RTL` · `INSPIRED_BY != IMPLEMENTS != PROVES`
+* **Forfatter / Author:** Marius Egerhei Torjusen · Risør, Norway (`ORCID: 0009-0006-0431-6637`)
+* **Lisens / License:** Apache-2.0
+* **Bevisgrense / Evidence Boundary:** `L1 Deterministisk Programvare & Syntetiserbar RTL` · `INSPIRED_BY != IMPLEMENTS != PROVES`
+
+> **In English:** **KOSMOS** (`v0.3`) is a zero-dependency, integer-only (`0 float`) state-transition, crash-recovery, and hardware-interlock kernel implemented in strict C11 (`-Werror -pedantic`, `ASan/UBSan`) and synthesizable `IEEE 1800-2012` SystemVerilog RTL (`Yosys` verified, `256/256` vector `XOR == 0` parity against C11). Inside the resting 3D symplectic chamber at $0.00\text{ V DC}$ (`HOLD`), trajectories $(q, p)$ can be reversed via $J(q, p) = (q, -p)$ without advancing history; crossing into committed state requires a two-stroke cryptographic witness gate ($W_{\mathrm{PRE}} \to W_{\mathrm{POST}}$), `fsync`-before-pulse binary `WAL` with `KTRN` torn-write quarantine, complementary dual-rail crowbar logic, 1,024-channel `TRAP` isolation, picosecond Time-of-Flight light-cone bounds, and 3D discrete exterior calculus (`SPEC/00`–`12` in English; run `make verify`).
 
 ---
 
@@ -76,7 +78,7 @@ Et punkt i kandidatrommet har fem koordinater $x = (h, q, p, u, s)$: historisk p
 
 ---
 
-## 2. Kosmos-teoremet og Karbor-skjerpingene
+## 2. Kosmos-teoremet og benkrevisjonene
 
 1. **Kosmos-teoremet ($\pi \circ \gamma = \text{konstant}$):** Projeksjonen $\pi : E \to B$ gitt ved $\pi(h, q, p, u, s) = h$ er kontinuerlig mot et diskret, lokalt endelig basisrom $B$. Enhver kontinuerlig bane $\gamma : [0, 1] \to E$ tvinges dermed til å ligge i ett og samme historiske fiber. Ingen glatt deformasjon i `HOLD` kan snike seg over i en ny historisk hendelse; overgangen krever sluseoperasjonen $\Omega$.
 2. **Symmetrisk heltallsgitter uten toerkomplement-felle:** I vanlig 64-bits heltallsaritmetikk mangler `INT64_MIN` ($-2^{63}$) positiv motpart, slik at $-p$ gir udefinert oppførsel og bryter $J^2 = I$. **KOSMOS** gjerder ut `INT64_MIN` som ulovlig giftverdi (`KOSMOS_POISON_MIN`) og låser faserommet til det eksakt symmetriske gitteret $[-M, +M]^6$ ($M = 2^{63}-1$), der $J(J(z)) = z$ og $J^*\omega = -\omega$ holder bit-eksakt i 128-bits heltall.
@@ -160,8 +162,8 @@ make verify
 `make verify` kjører hele kjeden uten eksterne pakker:
 
 * **C11-kjerne med ASan/UBSan:** Kompilerer `CORE/` og `TESTS/test_core_c11.c` med `gcc -std=c11 -Wall -Wextra -Werror -pedantic -Wconversion -Wsign-conversion -fsanitize=address,undefined`.
-* **SystemVerilog RTL & syntesesjekk:** Kjører `iverilog -g2012 -Wall` på `RTL/kosmos_gate.sv` + `RTL/tb_kosmos_gate.sv` og verifiserer syntetiserbarhet gjennom `yosys`.
-* **De fem Python-bruddprøvene mot `libkosmos.so`:** Verifiserer speilinvolusjon, $L^\infty\text{-grenser}$, Belnap–Dunn Chu-vitner, prefikslås med Cantor-sylindere, og sperring mot uautorisert eller uavklart realisering.
+* **SystemVerilog RTL & syntesesjekk:** Kjører `iverilog -g2012 -Wall` på alle tre RTL-slusene (`kosmos_gate.sv`, `kosmos_dual_rail_gate.sv` og `kosmos_v03_physics_gate.sv`) og verifiserer syntetiserbarhet gjennom `yosys` (`0 latches, 0 errors`).
+* **Åtte Python-bruddprøver mot `libkosmos.so`:** Verifiserer speilinvolusjon, $L^\infty\text{-grenser}$, Belnap–Dunn Chu-vitner, prefikslås med Cantor-sylindere, kaldstart-WAL (`KTRN`), 1 024-kanals `TRAP`, 3D cellekalkyle og `256`-vektors C11 $\leftrightarrow$ RTL `XOR == 0`-paritet.
 * **Overflate- og seglkontroll:** Verifiserer `0 float` i kjerne og RTL, `0` lekkede stier, kollisjonsfri MathJax, rette `text`-rammer og gyldig `MANIFEST.sha256`.
 
 ---

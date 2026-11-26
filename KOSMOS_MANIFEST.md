@@ -1,4 +1,4 @@
-# KOSMOS — Arkitekturmanifest (Karbor-utgave v0.1)
+# KOSMOS — Arkitekturmanifest (Benkrevisjon v0.1–v0.3)
 
 $$\mathfrak{K} = \bigl(E,\; B,\; \omega,\; J,\; \mathcal{A},\; \mathcal{C}_4,\; \Omega\bigr)$$
 
@@ -6,7 +6,7 @@ Dette manifestet fastsetter hva som ble beholdt fra utkast I og II, og hvilke fe
 
 ---
 
-## 1. De fem Karbor-rettelsene over Kandidat II
+## 1. De fem grunnrettelsene over Kandidat II
 
 | Punkt | Hull i tidligere utkast | Herdet løsning i `KOSMOS` v0.1 |
 | :--- | :--- | :--- |
