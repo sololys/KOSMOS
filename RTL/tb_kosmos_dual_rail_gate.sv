@@ -164,8 +164,7 @@ module tb_kosmos_dual_rail_gate;
 
     task automatic fail_now(input [255:0] msg);
         begin
-            $display("[DUAL-RAIL FAIL] %0s", msg);
-            $finish(1);
+            $fatal(1, "[DUAL-RAIL FAIL] %0s", msg);
         end
     endtask
 

@@ -26,11 +26,22 @@ Dette manifestet fastsetter hva som ble beholdt fra utkast I og II, og hvilke fe
 | **Lokalt endelig kanalgraf** | Én feilende kanal drar ned nabokanaler eller mangler isolert karantene. | 1 024 kanaler med $\deg(k) \le 4$ der lokalt avvik setter kun kanal $k$ i `TRAP` (`0x5A`, $u_k = 0$) i $O(1)$ tid. |
 | **Alexandrov-flytid (TDC)** | Pakker utenfor lyskjeglen eller ekko inne i vinduet uten eget vitne. | Heltallig pikosekundsjekk $[\tau_{\min} + \delta\tau_{\text{cal}}, \tau_{\max} - \delta\tau_{\text{cal}}]$ der ekko innenfor vinduet fortsatt krever Chu-vitne og fersk nonce. |
 | **128-bits hjørnevakt & Landauer** | Hjørnevektor $(80, 80, 10)$ passerer $L^\infty \le 100$, men sprenger $100^2 = 10\,000$. | Eksakt 128-bits heltallig kvadratsum uten rot eller divisjon, pluss eksplisitt logisk Landauer-nedregrense (`L1 != fysisk kalorimetri`). |
-| **Dual-rail & NVRAM-skygge** | Enkelttråds bitfeil (`0 -> 1`) og tap av `IN_FLIGHT` over varm reset i RTL. | Komplementære trådpar (`01`/`10`, mens `00`/`11` løser ut kombinatorisk `crowbar_trip`) og NVRAM-skygge som låser `STATE_UNRESOLVED` ved oppstart. |
+| **Dual-rail & NVRAM-skygge** | Enkelttråds bitfeil (`0 -> 1`) og tap av `IN_FLIGHT` over varm reset i RTL. | Komplementære trådpar (`01`/`10`, mens `00`/`11` løser ut kombinatorisk `crowbar_trip`), to-syklus `WAL-før-puls` og klebrig `unresolved_latched` i NVRAM (`v0.2.1`). |
 
 ---
 
-## 3. Grunnlovene i granitt
+## 3. Universelle naturlover i `v0.3` (Ren universmodell)
+
+| Modul | Fysisk virkefelt | Invariant i C11 og RTL (`0 float`, `XOR == 0`) |
+| :--- | :--- | :--- |
+| **`SPEC/09` · Cellekalkyle & Lenz** | 3D-felt på hjørner, kanter, flater og bokser | $D_1(D_0 f) \equiv 0$, $D_2(D_1 e) \equiv 0$, 7-punkts heltalls-Laplacian uten sjakkbrett-felle, og Faraday–Lenz-lås $\mathcal{E} \cdot \Delta \Phi_B \le 0$. |
+| **`SPEC/10` · Nitonisk rom** | Lokal treghet inne i én node | $\Delta t > 0$, $m_i \ge 1$, $\lvert m_i \Delta^2 q_i \rvert \le F_{\max,i} \Delta t$, eksakt doblet kinetisk arbeid (ingen `1/2 == 0` gratisenergi) og retten til hvile (`HOLD`). |
+| **`SPEC/11` · Nashusistisk rom** | Koblede kanaler og gjensidighet | Parvis 3.-lovs-symmetri $C_{ij} == C_{ji}$ og $F_{ij} + F_{ji} == 0$ (uten død kanselleringssum) pluss strengt Nash-punkt $2\lvert \sum_j C_{ij} q_j - B_i \rvert < C_{ii}$. |
+| **`SPEC/12` · Horisont & Gödel** | Mellom noder og mot evighetsløkker | Minkowski-lyskjegle $\Delta r^2 \le c^2 \Delta t^2$, luftspalte-lås med åpningsarbeid, entropitak $\dot{S}_{\mathrm{gen}} \le \dot{S}_{\mathrm{sink}}$ og Gödel-iterasjonstak mot selvreferanse. |
+
+---
+
+## 4. Grunnlovene i granitt
 
 1. **Involusjon og antisymplektisk speil:** $J(q, p) = (q, -p)$ oppfyller $J^2 = I$ og $J^*\omega = -\omega$ på hele $[-M, +M]^6$.
 2. **Topologisk frakobling:** Enhver kontinuerlig bane $\gamma : [0, 1] \to E$ oppfyller $\pi \circ \gamma = \text{konstant}$.

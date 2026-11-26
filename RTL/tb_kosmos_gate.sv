@@ -105,8 +105,7 @@ module tb_kosmos_gate;
 
     task automatic fail_now(input [255:0] msg);
         begin
-            $display("[RTL FAIL] %0s", msg);
-            $finish(1);
+            $fatal(1, "[RTL FAIL] %0s", msg);
         end
     endtask
 

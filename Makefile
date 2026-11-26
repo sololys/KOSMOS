@@ -12,14 +12,18 @@ CORE_SRC := CORE/kosmos_sha256.c \
             CORE/kosmos_wal.c \
             CORE/kosmos_channel_sluice.c \
             CORE/kosmos_tdc_window.c \
-            CORE/kosmos_energy_128.c
+            CORE/kosmos_energy_128.c \
+            CORE/kosmos_cellular_field.c \
+            CORE/kosmos_newtonian_inertia.c \
+            CORE/kosmos_nash_reciprocity.c \
+            CORE/kosmos_horizon_godel.c
 
 all: verify
 
 verify: c11 rtl py surface
-	@echo "[PASS] KOSMOS v0.2 granite verification 100% green (C11 + ASan/UBSan + Dual-RTL + Yosys + Python + Manifest)."
+	@echo "[PASS] KOSMOS v0.3 granite verification 100% green (C11 + ASan/UBSan + 3xRTL + Yosys + XOR==0 Parity + Manifest)."
 
-build/libkosmos.so: $(CORE_SRC) CORE/kosmos_space.h CORE/kosmos_v02.h CORE/kosmos_sha256.h
+build/libkosmos.so: $(CORE_SRC) CORE/kosmos_space.h CORE/kosmos_v02.h CORE/kosmos_v03.h CORE/kosmos_sha256.h
 	@mkdir -p build
 	$(CC) $(CFLAGS) -fPIC -shared $(CORE_SRC) -ICORE -o build/libkosmos.so
 
@@ -34,10 +38,12 @@ rtl:
 	vvp build/tb_kosmos_gate.vvp
 	iverilog -g2012 -Wall -o build/tb_kosmos_dual_rail_gate.vvp RTL/kosmos_dual_rail_gate.sv RTL/tb_kosmos_dual_rail_gate.sv
 	vvp build/tb_kosmos_dual_rail_gate.vvp
-	yosys -q -p "read_verilog -sv RTL/kosmos_gate.sv RTL/kosmos_dual_rail_gate.sv; proc; opt; check -assert; stat"
-	@echo "[PASS] Yosys synthesis check clean on both RTL gates (0 latches, 0 errors)."
+	iverilog -g2012 -Wall -o build/tb_kosmos_v03_physics_gate.vvp RTL/kosmos_v03_physics_gate.sv RTL/tb_kosmos_v03_physics_gate.sv
+	vvp build/tb_kosmos_v03_physics_gate.vvp
+	yosys -q -p "read_verilog -sv RTL/kosmos_gate.sv RTL/kosmos_dual_rail_gate.sv RTL/kosmos_v03_physics_gate.sv; proc; opt; check -assert; stat"
+	@echo "[PASS] Yosys synthesis check clean across all 3 RTL gates (0 latches, 0 errors)."
 
-py: build/libkosmos.so
+py: build/libkosmos.so rtl
 	python3 -B TESTS/test_involution.py
 	python3 -B TESTS/test_boundary.py
 	python3 -B TESTS/test_witness.py
@@ -45,6 +51,7 @@ py: build/libkosmos.so
 	python3 -B TESTS/test_no_unauthorized_commit.py
 	python3 -B TESTS/test_v02_extensions.py
 	python3 -B TESTS/test_round2_adversarial.py
+	python3 -B TESTS/test_v03_physics_parity.py
 
 manifest:
 	python3 -B TESTS/verify_surface.py --write-manifest

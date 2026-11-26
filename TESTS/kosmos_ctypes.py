@@ -24,6 +24,9 @@ KOSMOS_VERDICT_OPEN = 0xA5
 
 KOSMOS_CHANNEL_COUNT = 1024
 KOSMOS_MAX_DEGREE = 4
+KOSMOS_GRID_N = 4
+KOSMOS_GRID_CELLS = 64
+KOSMOS_NASH_MAX_K = 8
 
 KOSMOS_L01_KEY_MAGIC = 0x4B4F534D4F533031
 
@@ -197,6 +200,74 @@ class KosmosLandauerLedger(ctypes.Structure):
         ("ebit_zepto_joule_milli", ctypes.c_uint64),
         ("logical_min_milli_zj", KosmosU128),
         ("budget_milli_zj", KosmosU128),
+    ]
+
+
+class KosmosScalarGrid(ctypes.Structure):
+    _fields_ = [("v", ctypes.c_int64 * KOSMOS_GRID_CELLS)]
+
+
+class KosmosVecGrid(ctypes.Structure):
+    _fields_ = [
+        ("x", ctypes.c_int64 * KOSMOS_GRID_CELLS),
+        ("y", ctypes.c_int64 * KOSMOS_GRID_CELLS),
+        ("z", ctypes.c_int64 * KOSMOS_GRID_CELLS),
+    ]
+
+
+class KosmosInertiaCfg(ctypes.Structure):
+    _fields_ = [
+        ("mass", ctypes.c_int64 * KOSMOS_DIM),
+        ("force_max", ctypes.c_int64 * KOSMOS_DIM),
+        ("energy_rem", KosmosU128),
+        ("w_min", KosmosU128),
+        ("entropy_toll", KosmosU128),
+    ]
+
+
+class KosmosNashSystem(ctypes.Structure):
+    _fields_ = [
+        ("k_channels", ctypes.c_uint32),
+        ("has_pair_forces", ctypes.c_uint32),
+        ("q", ctypes.c_int64 * KOSMOS_NASH_MAX_K),
+        ("b_witness", ctypes.c_int64 * KOSMOS_NASH_MAX_K),
+        ("c_matrix", ctypes.c_int64 * (KOSMOS_NASH_MAX_K * KOSMOS_NASH_MAX_K)),
+        ("f_pair", ctypes.c_int64 * (KOSMOS_NASH_MAX_K * KOSMOS_NASH_MAX_K)),
+    ]
+
+
+class KosmosV03RtlVec(ctypes.Structure):
+    _fields_ = [
+        ("rail_p", ctypes.c_uint8),
+        ("rail_n", ctypes.c_uint8),
+        ("airgap_sealed", ctypes.c_uint8),
+        ("ancestry_valid", ctypes.c_uint8),
+        ("unmerged_fork", ctypes.c_uint8),
+        ("undecidable_hit", ctypes.c_uint8),
+        ("has_ext_witness", ctypes.c_uint8),
+        ("pad0", ctypes.c_uint8),
+        ("dt_ticks", ctypes.c_uint32),
+        ("formal_iters", ctypes.c_uint32),
+        ("max_iters", ctypes.c_uint32),
+        ("pad1", ctypes.c_uint32),
+        ("dphi_b", ctypes.c_int32),
+        ("emf_induced", ctypes.c_int32),
+        ("emf_max", ctypes.c_int32),
+        ("force_in", ctypes.c_int32),
+        ("force_max", ctypes.c_int32),
+        ("f_ab", ctypes.c_int32),
+        ("f_ba", ctypes.c_int32),
+        ("nash_res_abs_2x", ctypes.c_int32),
+        ("nash_c_ii", ctypes.c_int32),
+        ("pad2", ctypes.c_int32),
+        ("w_lift_work", ctypes.c_uint64),
+        ("dr_sq", ctypes.c_uint64),
+        ("ct_sq", ctypes.c_uint64),
+        ("energy_rem_2x", ctypes.c_uint64),
+        ("w_min_2x", ctypes.c_uint64),
+        ("energy_cost_2x", ctypes.c_uint64),
+        ("s_dot_gen", ctypes.c_uint64),
+        ("s_dot_sink", ctypes.c_uint64),
     ]
 
 
@@ -474,5 +545,78 @@ def load_kosmos() -> ctypes.CDLL:
         ctypes.POINTER(ctypes.c_uint8),
     ]
     lib.kosmos_landauer_record_prune.restype = ctypes.c_int
+
+    # --- v0.3 bindings ---
+    lib.kosmos_sizeof_v03_rtl_vec.argtypes = []
+    lib.kosmos_sizeof_v03_rtl_vec.restype = ctypes.c_size_t
+    assert (
+        ctypes.sizeof(KosmosV03RtlVec) == lib.kosmos_sizeof_v03_rtl_vec()
+    ), "ABI size mismatch: KosmosV03RtlVec"
+
+    lib.kosmos_field_grad.argtypes = [ctypes.POINTER(KosmosScalarGrid), ctypes.POINTER(KosmosVecGrid)]
+    lib.kosmos_field_grad.restype = ctypes.c_int
+    lib.kosmos_field_curl.argtypes = [ctypes.POINTER(KosmosVecGrid), ctypes.POINTER(KosmosVecGrid)]
+    lib.kosmos_field_curl.restype = ctypes.c_int
+    lib.kosmos_field_div.argtypes = [ctypes.POINTER(KosmosVecGrid), ctypes.POINTER(KosmosScalarGrid)]
+    lib.kosmos_field_div.restype = ctypes.c_int
+    lib.kosmos_field_laplacian7.argtypes = [ctypes.POINTER(KosmosScalarGrid), ctypes.POINTER(KosmosScalarGrid)]
+    lib.kosmos_field_laplacian7.restype = ctypes.c_int
+
+    lib.kosmos_eval_faraday_lenz.argtypes = [
+        ctypes.c_int64,
+        ctypes.c_int64,
+        ctypes.c_int64,
+        ctypes.POINTER(ctypes.c_uint8),
+    ]
+    lib.kosmos_eval_faraday_lenz.restype = ctypes.c_int
+
+    lib.kosmos_eval_newtonian_step.argtypes = [
+        ctypes.POINTER(KosmosInertiaCfg),
+        ctypes.POINTER(KosmosPoint3),
+        ctypes.POINTER(KosmosPoint3),
+        ctypes.POINTER(KosmosPoint3),
+        ctypes.c_uint64,
+        ctypes.POINTER(ctypes.c_uint8),
+    ]
+    lib.kosmos_eval_newtonian_step.restype = ctypes.c_int
+
+    lib.kosmos_eval_nash_equilibrium.argtypes = [
+        ctypes.POINTER(KosmosNashSystem),
+        ctypes.POINTER(ctypes.c_uint8),
+    ]
+    lib.kosmos_eval_nash_equilibrium.restype = ctypes.c_int
+
+    lib.kosmos_eval_lightcone_airgap.argtypes = [
+        ctypes.c_int64,
+        ctypes.c_int64,
+        ctypes.c_int64,
+        ctypes.c_uint64,
+        ctypes.c_uint64,
+        ctypes.c_uint8,
+        ctypes.c_uint8,
+        ctypes.c_uint64,
+        ctypes.c_uint8,
+        ctypes.POINTER(ctypes.c_uint8),
+    ]
+    lib.kosmos_eval_lightcone_airgap.restype = ctypes.c_int
+
+    lib.kosmos_eval_entropy_ceiling.argtypes = [
+        KosmosU128,
+        KosmosU128,
+        ctypes.POINTER(ctypes.c_uint8),
+    ]
+    lib.kosmos_eval_entropy_ceiling.restype = ctypes.c_int
+
+    lib.kosmos_eval_godel_witness.argtypes = [
+        ctypes.c_uint64,
+        ctypes.c_uint64,
+        ctypes.c_uint8,
+        ctypes.c_uint8,
+        ctypes.POINTER(ctypes.c_uint8),
+    ]
+    lib.kosmos_eval_godel_witness.restype = ctypes.c_int
+
+    lib.kosmos_eval_v03_rtl_twin.argtypes = [ctypes.POINTER(KosmosV03RtlVec)]
+    lib.kosmos_eval_v03_rtl_twin.restype = ctypes.c_uint8
 
     return lib

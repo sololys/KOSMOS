@@ -82,7 +82,8 @@ Et punkt i kandidatrommet har fem koordinater $x = (h, q, p, u, s)$: historisk p
 2. **Symmetrisk heltallsgitter uten toerkomplement-felle:** I vanlig 64-bits heltallsaritmetikk mangler `INT64_MIN` ($-2^{63}$) positiv motpart, slik at $-p$ gir udefinert oppførsel og bryter $J^2 = I$. **KOSMOS** gjerder ut `INT64_MIN` som ulovlig giftverdi (`KOSMOS_POISON_MIN`) og låser faserommet til det eksakt symmetriske gitteret $[-M, +M]^6$ ($M = 2^{63}-1$), der $J(J(z)) = z$ og $J^*\omega = -\omega$ holder bit-eksakt i 128-bits heltall.
 3. **Skille mellom kandidatavvisning (`HOLD`) og hard grense (`KILL`):** En vill idé inne i tenkerommet skal avvises til `HOLD` ($u = 0$), ikke sprenge hovedsikringen. Bare brudd på anleggets harde ramme $\mathcal{A}_{\text{hard}}$, motstridende vitner (`CONFLICT`), åpen sløyfesprekk ($\Delta_{\text{seam}} \neq 0$), repriseforsøk eller giftverdier utløser låst `KILL` ($0.00\text{ V}$).
 4. **To-takts realisering (`OPEN != REALIZED`) og kaldstart-lås (`v0.2`):** Godkjent $W_{\mathrm{PRE}}$ gir dommen `OPEN` (`0xA5`), skriver binær WAL-post med `fsync()` og flytter slusen til `IN_FLIGHT`. Forsvinner strømmen før $W_{\mathrm{POST}}$, gjenoppstår porten ved kaldstart fra disk direkte i `UNRESOLVED` med $u = 0$, og gjenoppretting krever engangs `HMAC-SHA256`-signatur over gjeldende `head_hash`.
-5. **Kanalisolasjon, pikosekund-flytid, 128-bits hjørnevakt og dual-rail (`v0.2`):** 1 024 lokalt endelige kanaler ($\deg \le 4$) med isolert `TRAP` (`0x5A`), Alexandrov-tidsvindu $[\tau_{\min} + \delta\tau_{\text{cal}}, \tau_{\max} - \delta\tau_{\text{cal}}]$, rotfri 128-bits kulevakt som fanger hjørnefeller som $(80, 80, 10)$ mot $100^2$, og komplementær dual-rail SystemVerilog-sluse (`00`/`11` gir kombinatorisk `crowbar_trip`).
+5. **Kanalisolasjon, pikosekund-flytid, 128-bits hjørnevakt og dual-rail (`v0.2` / `v0.2.1`):** 1 024 lokalt endelige kanaler ($\deg \le 4$) med isolert `TRAP` (`0x5A`), Alexandrov-tidsvindu $[\tau_{\min} + \delta\tau_{\text{cal}}, \tau_{\max} - \delta\tau_{\text{cal}}]$, rotfri 128-bits kulevakt som fanger hjørnefeller som $(80, 80, 10)$ mot $100^2$, og komplementær dual-rail SystemVerilog-sluse med to-syklus `WAL-før-puls` og `KTRN`-karantene.
+6. **3D cellekalkyle, Nitonisk treghet, Nashusistisk gjensidighet og kausal horisont (`v0.3`):** Eksakte heltallsoperatorer (`grad`, `curl`, `div`, 7-punkts `laplacian`) med $D_1 D_0 \equiv 0$, $D_2 D_1 \equiv 0$ og Faraday–Lenz-lås (`SPEC/09`), lokal treghet og doblet kinetisk arbeid med retten til hvile (`SPEC/10`), parvis 3.-lovs-symmetri og diskret Nash-likevekt (`SPEC/11`), samt Minkowski-lyskjegle, luftspalte-lås, entropitak og Gödel-vitnegrense med bit-eksakt `XOR == 0` paritet mellom C11 og RTL (`SPEC/12`).
 
 ---
 
@@ -104,10 +105,15 @@ KOSMOS/
 |   |-- 05_OMEGA_GATE.md
 |   |-- 06_HISTORY.md
 |   |-- 07_CHANNEL_CONE_ENERGY.md
-|   `-- 08_DUAL_RAIL_AND_WAL_RECOVERY.md
+|   |-- 08_DUAL_RAIL_AND_WAL_RECOVERY.md
+|   |-- 09_CELLULAR_FIELD_CALCULUS.md
+|   |-- 10_NEWTONIAN_INERTIA.md
+|   |-- 11_NASH_RECIPROCITY.md
+|   `-- 12_CAUSAL_HORIZON_AND_GODEL.md
 |-- CORE/
 |   |-- kosmos_space.h
 |   |-- kosmos_v02.h
+|   |-- kosmos_v03.h
 |   |-- kosmos_sha256.h
 |   |-- kosmos_sha256.c
 |   |-- kosmos_mirror.c
@@ -117,12 +123,18 @@ KOSMOS/
 |   |-- kosmos_wal.c
 |   |-- kosmos_channel_sluice.c
 |   |-- kosmos_tdc_window.c
-|   `-- kosmos_energy_128.c
+|   |-- kosmos_energy_128.c
+|   |-- kosmos_cellular_field.c
+|   |-- kosmos_newtonian_inertia.c
+|   |-- kosmos_nash_reciprocity.c
+|   `-- kosmos_horizon_godel.c
 |-- RTL/
 |   |-- kosmos_gate.sv
 |   |-- tb_kosmos_gate.sv
 |   |-- kosmos_dual_rail_gate.sv
-|   `-- tb_kosmos_dual_rail_gate.sv
+|   |-- tb_kosmos_dual_rail_gate.sv
+|   |-- kosmos_v03_physics_gate.sv
+|   `-- tb_kosmos_v03_physics_gate.sv
 `-- TESTS/
     |-- kosmos_ctypes.py
     |-- test_core_c11.c
@@ -133,6 +145,7 @@ KOSMOS/
     |-- test_no_unauthorized_commit.py
     |-- test_v02_extensions.py
     |-- test_round2_adversarial.py
+    |-- test_v03_physics_parity.py
     `-- verify_surface.py
 ```
 
