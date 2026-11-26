@@ -277,7 +277,8 @@ module kosmos_v03_physics_gate (
         end else begin
             pulse_active_q <= 1'b0;
 
-            if (!rail_ok || any_poison || (comb_verdict == VERDICT_KILL && req_open)) begin
+            if (!rail_ok || any_poison ||
+                ((comb_verdict == VERDICT_KILL) && (req_open || commit_armed_q))) begin
                 commit_armed_q <= 1'b0;
                 if ((state_q == STATE_IN_FLIGHT) || (state_q == STATE_UNRESOLVED)) begin
                     unresolved_latched_q <= 1'b1;
@@ -321,8 +322,13 @@ module kosmos_v03_physics_gate (
                     STATE_IN_FLIGHT: begin
                         if (commit_armed_q) begin
                             commit_armed_q <= 1'b0;
-                            pulse_active_q <= 1'b1;
-                            verdict_q      <= VERDICT_OPEN;
+                            // Recheck physics at T2 before issuing the armed pulse.
+                            verdict_q <= comb_verdict;
+                            if (comb_verdict == VERDICT_OPEN) begin
+                                pulse_active_q <= 1'b1;
+                            end else begin
+                                state_q <= STATE_UNRESOLVED;
+                            end
                         end else begin
                             verdict_q <= VERDICT_HOLD;
                             if (req_post) begin
