@@ -170,6 +170,8 @@ typedef struct {
 typedef struct {
     uint32_t          state;
     uint32_t          min_witnesses;
+    uint32_t          unresolved_latched;
+    uint32_t          reserved_gate;
     uint64_t          last_cycle;
     uint64_t          last_nonce;
     uint64_t          open_cycle;

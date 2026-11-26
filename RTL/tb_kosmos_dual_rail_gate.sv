@@ -1,12 +1,14 @@
-// KOSMOS v0.2 — Testbench for Dual-Rail, Cold-Boot, ToF, and Corner Guard
+// KOSMOS v0.2.1 — Testbench for Dual-Rail, WAL-Before-Pulse, and Sticky-Unresolved
 // RTL/tb_kosmos_dual_rail_gate.sv
 //
-// Exercises:
-//   1. Cold-boot power cut between PRE and POST -> wakes in UNRESOLVED, blocks OPEN,
-//      preserves unresolved tag, and requires non-replayable challenge-bound L01 sig
-//   2. Alexandrov ToF 133_425 ps vs 133_426 ps + echo inside window without Chu witness
-//   3. Corner trap (80, 80, 10) vs L-inf 100 and 100^2 = 10_000
-//   4. 0-cycle combinational crowbar_trip on dual-rail 00 / 11 symmetry fault
+// Exercises all original + Round-2 adversarial hardware invariants:
+//   1. Alexandrov ToF 133_425 ps vs 133_426 ps + echo inside window without Chu witness
+//   2. Corner trap (80, 80, 10) vs L-inf 100 and 100^2 = 10_000
+//   3. WAL-Before-Pulse (T1 FRAM commit at 0 V, T2 pulse): power cut MID-PULSE wakes in
+//      STATE_UNRESOLVED with preserved tag and nonce (Round-2 Brudd 3 regression!)
+//   4. Simultaneous 00/11 dual-rail fault + RESET_BY_L01 while in STATE_UNRESOLVED:
+//      0-cycle crowbar_trip AND FRAM preserves fram_unresolved + fram_pending_tag across KILL;
+//      clearing KILL returns to STATE_UNRESOLVED, never straight to STATE_HOLD (Round-2 Brudd 2!)
 //
 // SPDX-License-Identifier: Apache-2.0
 
@@ -39,6 +41,7 @@ module tb_kosmos_dual_rail_gate;
     // Simulated non-volatile FRAM cell surviving sys_rst_n power loss
     reg         fram_valid;
     reg   [1:0] fram_state;
+    reg         fram_unresolved;
     reg  [31:0] fram_nonce;
     reg  [31:0] fram_hist_len;
     reg  [31:0] fram_digest;
@@ -46,6 +49,7 @@ module tb_kosmos_dual_rail_gate;
 
     wire        nvm_out_valid;
     wire  [1:0] nvm_out_state;
+    wire        nvm_out_unresolved;
     wire [31:0] nvm_out_nonce;
     wire [31:0] nvm_out_hist_len;
     wire [31:0] nvm_out_digest;
@@ -55,6 +59,7 @@ module tb_kosmos_dual_rail_gate;
     wire        act_enable_p;
     wire        act_enable_n;
     wire  [1:0] lock_state;
+    wire        unresolved_latched;
     wire  [7:0] verdict_code;
     wire [31:0] issued_pre_tag;
     wire [31:0] history_len;
@@ -84,12 +89,14 @@ module tb_kosmos_dual_rail_gate;
         .l01_challenge_sig   (l01_challenge_sig),
         .nvm_in_valid        (fram_valid),
         .nvm_in_state        (fram_state),
+        .nvm_in_unresolved   (fram_unresolved),
         .nvm_in_nonce        (fram_nonce),
         .nvm_in_hist_len     (fram_hist_len),
         .nvm_in_digest       (fram_digest),
         .nvm_in_pending_tag  (fram_pending_tag),
         .nvm_out_valid       (nvm_out_valid),
         .nvm_out_state       (nvm_out_state),
+        .nvm_out_unresolved  (nvm_out_unresolved),
         .nvm_out_nonce       (nvm_out_nonce),
         .nvm_out_hist_len    (nvm_out_hist_len),
         .nvm_out_digest      (nvm_out_digest),
@@ -98,6 +105,7 @@ module tb_kosmos_dual_rail_gate;
         .act_enable_p        (act_enable_p),
         .act_enable_n        (act_enable_n),
         .lock_state          (lock_state),
+        .unresolved_latched  (unresolved_latched),
         .verdict_code        (verdict_code),
         .issued_pre_tag      (issued_pre_tag),
         .history_len         (history_len),
@@ -107,11 +115,11 @@ module tb_kosmos_dual_rail_gate;
 
     always #5 clk = ~clk;
 
-    // FRAM latches shadow whenever power is up (sys_rst_n == 1)
     always @(posedge clk) begin
         if (!por_rst_n) begin
             fram_valid       <= 1'b0;
             fram_state       <= 2'd0;
+            fram_unresolved  <= 1'b0;
             fram_nonce       <= 32'd0;
             fram_hist_len    <= 32'd0;
             fram_digest      <= 32'd0;
@@ -119,6 +127,7 @@ module tb_kosmos_dual_rail_gate;
         end else if (sys_rst_n) begin
             fram_valid       <= nvm_out_valid;
             fram_state       <= nvm_out_state;
+            fram_unresolved  <= nvm_out_unresolved;
             fram_nonce       <= nvm_out_nonce;
             fram_hist_len    <= nvm_out_hist_len;
             fram_digest      <= nvm_out_digest;
@@ -128,13 +137,14 @@ module tb_kosmos_dual_rail_gate;
 
     function automatic [31:0] compute_l01_sig(
         input [31:0] dig,
+        input        unres_bit,
         input  [1:0] st,
         input [31:0] hlen
     );
         reg [31:0] c;
         integer k;
         begin
-            c = (dig ^ {30'd0, st}) ^ (32'h4B30_354D ^ hlen);
+            c = (dig ^ {29'd0, unres_bit, st}) ^ (32'h4B30_354D ^ hlen);
             for (k = 0; k < 8; k = k + 1) begin
                 if ((c & 32'd1) != 32'd0)
                     c = (c >> 1) ^ 32'hEDB8_8320;
@@ -160,7 +170,8 @@ module tb_kosmos_dual_rail_gate;
     endtask
 
     reg [31:0] saved_pre_tag;
-    reg [31:0] used_sig;
+    reg [31:0] sig_kill_stepdown;
+    reg [31:0] sig_unres_clear;
     reg [31:0] len_at_cut;
 
     initial begin
@@ -185,14 +196,15 @@ module tb_kosmos_dual_rail_gate;
         l01_challenge_sig = 32'd0;
 
         repeat (2) @(posedge clk);
+        #1;
         por_rst_n = 1'b1;
         sys_rst_n = 1'b1;
         @(posedge clk);
         #1;
 
-        // 1. ToF boundary: 133_426 ps rejected as TRAP (0x5A); echo at 133_425 ps without Chu rejected
+        // 1. ToF boundary (133_426 ps rejected) & echo without Chu witness rejected
         tof_meas_ps = 32'd133426;
-        set_cmd(4'b0001); // req_open
+        set_cmd(4'b0001);
         @(posedge clk);
         #1;
         if (verdict_code !== 8'h5A || act_enable_p !== 1'b0 || act_enable_n !== 1'b1)
@@ -200,13 +212,13 @@ module tb_kosmos_dual_rail_gate;
 
         tof_meas_ps = 32'd133425;
         chu_w0      = 2'b00;
-        chu_w1      = 2'b00; // Echo inside ToF window, but no Chu witness!
+        chu_w1      = 2'b00;
         @(posedge clk);
         #1;
         if (verdict_code !== 8'h3C || act_enable_p !== 1'b0)
             fail_now("Echo inside ToF window without Chu witness was not held");
 
-        // 2. Corner trap (80, 80, 10): passes L-inf <= 100, fails 80^2+80^2+10^2 = 12900 > 10000
+        // 2. Corner trap (80, 80, 10) vs 100^2 = 10_000
         chu_w0 = 2'b10;
         chu_w1 = 2'b10;
         vec_x  = 16'sd80;
@@ -217,74 +229,84 @@ module tb_kosmos_dual_rail_gate;
         if (verdict_code !== 8'h5A || act_enable_p !== 1'b0)
             fail_now("Corner vector (80,80,10) slipped past 100^2 guard");
 
-        // 3. Valid PRE (50, 50, 10 -> 5100 <= 10000) -> OPEN (IN_FLIGHT), then COLD-BOOT POWER LOSS!
+        // 3. WAL-Before-Pulse + Mid-Pulse Power Cut (Round-2 Brudd 3 regression!)
         vec_x = 16'sd50;
         vec_y = 16'sd50;
         vec_z = 16'sd10;
-        @(posedge clk); // Cycle of OPEN; FRAM captures IN_FLIGHT on next posedge
+        @(posedge clk); // Cycle T1: pre-commit to FRAM, act_enable_p MUST still be 0!
         #1;
-        if (verdict_code !== 8'hA5 || lock_state !== 2'd1 || act_enable_p !== 1'b1 || act_enable_n !== 1'b0)
-            fail_now("Valid PRE did not issue dual-rail OPEN");
-        saved_pre_tag = issued_pre_tag;
         set_cmd(4'b0000);
-        @(posedge clk); // FRAM latches STATE_IN_FLIGHT + saved_pre_tag
+        if (lock_state !== 2'd1 || act_enable_p !== 1'b0 || verdict_code !== 8'h3C)
+            fail_now("Cycle T1 violated WAL-Before-Pulse (energized rail before FRAM latch)");
+        saved_pre_tag = issued_pre_tag;
+
+        @(posedge clk); // Cycle T2: FRAM is now latched AND act_enable_p == 1 fires!
         #1;
+        if (act_enable_p !== 1'b1 || act_enable_n !== 1'b0 || verdict_code !== 8'hA5 ||
+            fram_state !== 2'd1 || fram_unresolved !== 1'b1 || fram_pending_tag !== saved_pre_tag)
+            fail_now("Cycle T2 failed to latch FRAM simultaneously with pulse");
         len_at_cut = history_len;
 
-        // Cut power (sys_rst_n = 0) BEFORE W_POST!
+        // Cut power MID-PULSE right inside Cycle T2!
         sys_rst_n = 1'b0;
         @(posedge clk);
         #1;
         sys_rst_n = 1'b1;
+        @(posedge clk); // FRAM syncs post-boot STATE_UNRESOLVED
         #1;
 
-        // Acceptance proof: after cold reboot, output is OFF, state is UNRESOLVED,
-        // interrupted tag is preserved, history_len incremented, and new OPEN is blocked!
-        if (lock_state !== 2'd2 || act_enable_p !== 1'b0 || act_enable_n !== 1'b1)
-            fail_now("Cold boot after PRE did not wake in STATE_UNRESOLVED with output OFF");
-        if (issued_pre_tag !== saved_pre_tag || history_len !== (len_at_cut + 32'd1))
-            fail_now("Cold boot lost interrupted tag or failed to append UNRESOLVED record");
+        if (lock_state !== 2'd2 || unresolved_latched !== 1'b1 ||
+            issued_pre_tag !== saved_pre_tag || act_enable_p !== 1'b0 ||
+            history_len !== (len_at_cut + 32'd1))
+            fail_now("Mid-pulse power cut failed to wake in STATE_UNRESOLVED with tag intact");
 
-        auth_nonce = 32'd2;
-        set_cmd(4'b0001); // Try new OPEN while UNRESOLVED
-        @(posedge clk);
-        #1;
-        set_cmd(4'b0000);
-        if (lock_state !== 2'd2 || act_enable_p !== 1'b0)
-            fail_now("New OPEN was not blocked after cold-boot UNRESOLVED");
-
-        // Sign one-time L01 recovery challenge and verify history extends
-        used_sig          = compute_l01_sig(history_digest, lock_state, history_len);
-        l01_challenge_sig = used_sig;
-        set_cmd(4'b1000); // req_l01
-        @(posedge clk);
-        #1;
-        set_cmd(4'b0000);
-        if (lock_state !== 2'd0 || history_len !== (len_at_cut + 32'd2))
-            fail_now("Challenge-signed L01 recovery failed or did not extend history");
-
-        // 4. Dual-rail symmetry breach (cmd_rail_p == 4'b0001, cmd_rail_n == 4'b1111 -> bit 0 is 11!)
-        cmd_rail_p = 4'b0001;
-        cmd_rail_n = 4'b1111;
+        // 4. Simultaneous Dual-Rail 00/11 Fault + Valid L01 Reset while in STATE_UNRESOLVED (Round-2 Brudd 2!)
+        sig_unres_clear   = compute_l01_sig(history_digest, unresolved_latched, lock_state, history_len);
+        l01_challenge_sig = sig_unres_clear;
+        cmd_rail_p        = 4'b1000; // req_l01 = 1
+        cmd_rail_n        = 4'b0110; // bit 0 has 00 fault!
         #1; // Check 0-cycle combinational crowbar!
-        if (crowbar_trip !== 1'b1 || act_enable_p !== 1'b0 || act_enable_n !== 1'b1)
-            fail_now("Dual-rail 11 fault did not trip combinational crowbar in 0 cycles");
-        @(posedge clk);
+        if (crowbar_trip !== 1'b1 || verdict_code !== 8'h00 || act_enable_p !== 1'b0)
+            fail_now("Simultaneous L01 + 00-fault failed 0-cycle crowbar_trip");
+
+        @(posedge clk); // Latches STATE_KILL
         #1;
         set_cmd(4'b0000);
-        if (lock_state !== 2'd3 || crowbar_trip !== 1'b1)
-            fail_now("Dual-rail fault did not latch STATE_KILL");
+        @(posedge clk); // FRAM updates
+        #1;
 
-        // Replaying the previous L01 signature must FAIL because history_digest changed!
-        l01_challenge_sig = used_sig;
+        // FRAM MUST still preserve fram_unresolved == 1 and fram_pending_tag == saved_pre_tag!
+        if (lock_state !== 2'd3 || fram_unresolved !== 1'b1 || fram_pending_tag !== saved_pre_tag)
+            fail_now("Dual-rail fault wiped fram_unresolved or fram_pending_tag in FRAM");
+
+        // L01 Recovery #1 from STATE_KILL MUST step down to STATE_UNRESOLVED (2), NOT STATE_HOLD (0)!
+        sig_kill_stepdown = compute_l01_sig(history_digest, unresolved_latched, lock_state, history_len);
+        l01_challenge_sig = sig_kill_stepdown;
         set_cmd(4'b1000);
         @(posedge clk);
         #1;
         set_cmd(4'b0000);
-        if (lock_state !== 2'd3)
-            fail_now("Replayed L01 signature wrongly cleared STATE_KILL");
+        if (lock_state !== 2'd2 || unresolved_latched !== 1'b1 || issued_pre_tag !== saved_pre_tag)
+            fail_now("Clearing KILL bypassed STATE_UNRESOLVED instead of stepping down");
 
-        $display("[PASS] RTL kosmos_dual_rail_gate: cold-boot UNRESOLVED, ToF, (80,80,10) corner, and 0-cycle dual-rail crowbar verified (hist=%0d).",
+        // Replaying sig_kill_stepdown MUST fail; dedicated L01 Recovery #2 clears STATE_UNRESOLVED -> STATE_HOLD
+        set_cmd(4'b1000);
+        @(posedge clk);
+        #1;
+        set_cmd(4'b0000);
+        if (lock_state !== 2'd2)
+            fail_now("Replayed KILL signature wrongly cleared STATE_UNRESOLVED");
+
+        sig_unres_clear   = compute_l01_sig(history_digest, unresolved_latched, lock_state, history_len);
+        l01_challenge_sig = sig_unres_clear;
+        set_cmd(4'b1000);
+        @(posedge clk);
+        #1;
+        set_cmd(4'b0000);
+        if (lock_state !== 2'd0 || unresolved_latched !== 1'b0 || issued_pre_tag !== 32'd0)
+            fail_now("Dedicated second L01 signature failed to clear STATE_UNRESOLVED to STATE_HOLD");
+
+        $display("[PASS] RTL kosmos_dual_rail_gate v0.2.1: WAL-before-pulse, sticky FRAM UNRESOLVED across KILL, ToF, corner, and 0-cycle crowbar verified (hist=%0d).",
                  history_len);
         $finish(0);
     end

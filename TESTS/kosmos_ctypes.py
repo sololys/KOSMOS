@@ -134,6 +134,8 @@ class KosmosGate(ctypes.Structure):
     _fields_ = [
         ("state", ctypes.c_uint32),
         ("min_witnesses", ctypes.c_uint32),
+        ("unresolved_latched", ctypes.c_uint32),
+        ("reserved_gate", ctypes.c_uint32),
         ("last_cycle", ctypes.c_uint64),
         ("last_nonce", ctypes.c_uint64),
         ("open_cycle", ctypes.c_uint64),

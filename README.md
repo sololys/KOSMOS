@@ -103,7 +103,8 @@ KOSMOS/
 |   |-- 04_CHU_WITNESS.md
 |   |-- 05_OMEGA_GATE.md
 |   |-- 06_HISTORY.md
-|   `-- 07_CHANNEL_CONE_ENERGY.md
+|   |-- 07_CHANNEL_CONE_ENERGY.md
+|   `-- 08_DUAL_RAIL_AND_WAL_RECOVERY.md
 |-- CORE/
 |   |-- kosmos_space.h
 |   |-- kosmos_v02.h
@@ -131,6 +132,7 @@ KOSMOS/
     |-- test_prefix.py
     |-- test_no_unauthorized_commit.py
     |-- test_v02_extensions.py
+    |-- test_round2_adversarial.py
     `-- verify_surface.py
 ```
 

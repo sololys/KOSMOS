@@ -44,6 +44,7 @@ py: build/libkosmos.so
 	python3 -B TESTS/test_prefix.py
 	python3 -B TESTS/test_no_unauthorized_commit.py
 	python3 -B TESTS/test_v02_extensions.py
+	python3 -B TESTS/test_round2_adversarial.py
 
 manifest:
 	python3 -B TESTS/verify_surface.py --write-manifest

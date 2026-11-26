@@ -68,10 +68,18 @@ static kosmos_status_t latch_kill(kosmos_gate_t *gate,
     uint8_t payload[32];
     uint64_t eff_cycle = (cycle >= gate->last_cycle) ? cycle : gate->last_cycle;
 
+    /* If an actuation was IN_FLIGHT when KILL struck, preserve UNRESOLVED latch and pre_hash */
+    if (gate->state == (uint32_t)KOSMOS_STATE_IN_FLIGHT ||
+        gate->state == (uint32_t)KOSMOS_STATE_UNRESOLVED) {
+        gate->unresolved_latched = 1u;
+    }
+
     memset(payload, 0, sizeof(payload));
     payload[0] = reason_tag;
     zero_ctrl(&gate->active_u);
-    memset(gate->pending_pre_hash, 0, sizeof(gate->pending_pre_hash));
+    if (gate->unresolved_latched == 0u) {
+        memset(gate->pending_pre_hash, 0, sizeof(gate->pending_pre_hash));
+    }
     gate->state = (uint32_t)KOSMOS_STATE_KILL;
     gate->last_cycle = eff_cycle;
 
@@ -380,13 +388,13 @@ kosmos_status_t kosmos_gate_confirm_post(kosmos_gate_t *gate,
         w_post->outcome_ok != 1u) {
         /* Untethered or failed POST locks gate into UNRESOLVED (never erases attempt) */
         gate->state = (uint32_t)KOSMOS_STATE_UNRESOLVED;
+        gate->unresolved_latched = 1u;
         (void)kosmos_history_append(&gate->history,
                                     w_post->cycle,
                                     (uint8_t)KOSMOS_EVT_OUTCOME_UNRESOLVED,
                                     KOSMOS_VERDICT_HOLD,
                                     w_post->witness_id,
                                     gate->pending_pre_hash);
-        memset(gate->pending_pre_hash, 0, sizeof(gate->pending_pre_hash));
         *verdict_out = KOSMOS_VERDICT_HOLD;
         return KOSMOS_ERR_TETHER;
     }
@@ -398,6 +406,7 @@ kosmos_status_t kosmos_gate_confirm_post(kosmos_gate_t *gate,
                                w_post->witness_id,
                                gate->pending_pre_hash);
     memset(gate->pending_pre_hash, 0, sizeof(gate->pending_pre_hash));
+    gate->unresolved_latched = 0u;
     if (st != KOSMOS_OK) {
         (void)latch_kill(gate, w_post->cycle, w_post->witness_id, 0xECu);
         *verdict_out = KOSMOS_VERDICT_KILL;
@@ -429,13 +438,13 @@ kosmos_status_t kosmos_gate_power_loss(kosmos_gate_t *gate,
     }
     if (gate->state == (uint32_t)KOSMOS_STATE_IN_FLIGHT) {
         gate->state = (uint32_t)KOSMOS_STATE_UNRESOLVED;
+        gate->unresolved_latched = 1u;
         (void)kosmos_history_append(&gate->history,
                                     eff_cycle,
                                     (uint8_t)KOSMOS_EVT_OUTCOME_UNRESOLVED,
                                     KOSMOS_VERDICT_HOLD,
                                     0u,
                                     gate->pending_pre_hash);
-        memset(gate->pending_pre_hash, 0, sizeof(gate->pending_pre_hash));
     }
     *verdict_out = KOSMOS_VERDICT_HOLD;
     return KOSMOS_OK;
@@ -465,7 +474,6 @@ kosmos_status_t kosmos_gate_l01_recover(kosmos_gate_t *gate,
     }
 
     zero_ctrl(&gate->active_u);
-    memset(gate->pending_pre_hash, 0, sizeof(gate->pending_pre_hash));
     memset(payload, 0, sizeof(payload));
     put_be64(payload, l01_key);
 
@@ -481,7 +489,14 @@ kosmos_status_t kosmos_gate_l01_recover(kosmos_gate_t *gate,
     }
 
     gate->last_cycle = cycle;
-    gate->state = (uint32_t)KOSMOS_STATE_HOLD;
+    if (gate->state == (uint32_t)KOSMOS_STATE_KILL && gate->unresolved_latched != 0u) {
+        /* Clearing KILL when an earlier PRE was unresolved steps down to UNRESOLVED, never straight to HOLD */
+        gate->state = (uint32_t)KOSMOS_STATE_UNRESOLVED;
+    } else {
+        gate->unresolved_latched = 0u;
+        memset(gate->pending_pre_hash, 0, sizeof(gate->pending_pre_hash));
+        gate->state = (uint32_t)KOSMOS_STATE_HOLD;
+    }
     *verdict_out = KOSMOS_VERDICT_HOLD;
     return KOSMOS_OK;
 }
