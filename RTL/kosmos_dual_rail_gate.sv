@@ -3,8 +3,8 @@
 //
 // Hardened against Round-2 adversarial findings:
 //   1. Complementary 4-lane dual-rail bus ((rail_p ^ rail_n) == 4'hF; 00/11 -> 0-cycle crowbar_trip)
-//   2. Two-cycle WAL-Before-Pulse: Cycle T1 commits IN_FLIGHT + tag + nonce to FRAM at 0.00 V;
-//      Cycle T2 fires the 1-cycle actuator pulse ONLY after FRAM is latched.
+//   2. Acknowledged WAL-Before-Pulse: Cycle T1 presents IN_FLIGHT + tag + nonce to FRAM at 0.00 V;
+//      Cycle T2 fires the 1-cycle actuator pulse after matching durable readback.
 //   3. Sticky unresolved_latched_q + preserved pending_tag_q across STATE_KILL so a dual-rail
 //      fault never wipes STATE_UNRESOLVED or its forensic tag from FRAM; clearing KILL steps
 //      down to STATE_UNRESOLVED first when an earlier PRE lacked POST.
@@ -282,10 +282,15 @@ module kosmos_dual_rail_gate (
 
                     STATE_IN_FLIGHT: begin
                         if (commit_armed_q) begin
-                            // Cycle T2: FRAM latches STATE_IN_FLIGHT on this clock edge; now fire 1-cycle pulse!
-                            commit_armed_q <= 1'b0;
-                            pulse_active_q <= 1'b1;
-                            verdict_q      <= VERDICT_OPEN;
+                            // The NVM controller returns only durably stored records.
+                            if (nvm_in_valid && (nvm_in_state == STATE_IN_FLIGHT) &&
+                                nvm_in_unresolved && (nvm_in_nonce == last_nonce_q) &&
+                                (nvm_in_hist_len == hist_len_q) && (nvm_in_digest == digest_q) &&
+                                (nvm_in_pending_tag == pending_tag_q)) begin
+                                commit_armed_q <= 1'b0;
+                                pulse_active_q <= 1'b1;
+                                verdict_q      <= VERDICT_OPEN;
+                            end
                         end else begin
                             verdict_q <= VERDICT_HOLD;
                             if (req_post) begin

@@ -7,7 +7,7 @@
 //   - Newtonian local inertia (dt > 0, |F| <= F_max, doubled energy & Right to Rest)
 //   - Pairwise 33-bit non-wrapping 3rd-Law check (F_AB + F_BA == 0) & strict Nash lock
 //   - Minkowski lightcone (dr_sq <= ct_sq), airgap work check, entropy ceiling & Godel bound
-//   - Two-cycle FRAM WAL-before-pulse & sticky unresolved_latched across KILL
+//   - Acknowledged FRAM WAL-before-pulse & sticky unresolved_latched across KILL
 //
 // SPDX-License-Identifier: Apache-2.0
 
@@ -320,9 +320,15 @@ module kosmos_v03_physics_gate (
 
                     STATE_IN_FLIGHT: begin
                         if (commit_armed_q) begin
-                            commit_armed_q <= 1'b0;
-                            pulse_active_q <= 1'b1;
-                            verdict_q      <= VERDICT_OPEN;
+                            // The NVM controller returns only durably stored records.
+                            if (nvm_in_valid && (nvm_in_state == STATE_IN_FLIGHT) &&
+                                nvm_in_unresolved && (nvm_in_nonce == last_nonce_q) &&
+                                (nvm_in_hist_len == hist_len_q) && (nvm_in_digest == digest_q) &&
+                                (nvm_in_pending_tag == pending_tag_q)) begin
+                                commit_armed_q <= 1'b0;
+                                pulse_active_q <= 1'b1;
+                                verdict_q      <= VERDICT_OPEN;
+                            end
                         end else begin
                             verdict_q <= VERDICT_HOLD;
                             if (req_post) begin

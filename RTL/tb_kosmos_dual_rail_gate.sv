@@ -4,7 +4,7 @@
 // Exercises all original + Round-2 adversarial hardware invariants:
 //   1. Alexandrov ToF 133_425 ps vs 133_426 ps + echo inside window without Chu witness
 //   2. Corner trap (80, 80, 10) vs L-inf 100 and 100^2 = 10_000
-//   3. WAL-Before-Pulse (T1 FRAM commit at 0 V, T2 pulse): power cut MID-PULSE wakes in
+//   3. WAL-Before-Pulse (T1 FRAM commit at 0 V, T2 after readback): power cut MID-PULSE wakes in
 //      STATE_UNRESOLVED with preserved tag and nonce (Round-2 Brudd 3 regression!)
 //   4. Simultaneous 00/11 dual-rail fault + RESET_BY_L01 while in STATE_UNRESOLVED:
 //      0-cycle crowbar_trip AND FRAM preserves fram_unresolved + fram_pending_tag across KILL;
@@ -115,6 +115,7 @@ module tb_kosmos_dual_rail_gate;
 
     always #5 clk = ~clk;
 
+    logic fram_ready = 1'b1;
     always @(posedge clk) begin
         if (!por_rst_n) begin
             fram_valid       <= 1'b0;
@@ -124,7 +125,7 @@ module tb_kosmos_dual_rail_gate;
             fram_hist_len    <= 32'd0;
             fram_digest      <= 32'd0;
             fram_pending_tag <= 32'd0;
-        end else if (sys_rst_n) begin
+        end else if (sys_rst_n && fram_ready) begin
             fram_valid       <= nvm_out_valid;
             fram_state       <= nvm_out_state;
             fram_unresolved  <= nvm_out_unresolved;
@@ -239,11 +240,24 @@ module tb_kosmos_dual_rail_gate;
             fail_now("Cycle T1 violated WAL-Before-Pulse (energized rail before FRAM latch)");
         saved_pre_tag = issued_pre_tag;
 
-        @(posedge clk); // Cycle T2: FRAM is now latched AND act_enable_p == 1 fires!
+        fram_ready = 1'b0;
+        repeat (2) begin
+            @(posedge clk);
+            #1;
+            if (act_enable_p !== 1'b0 || act_enable_n !== 1'b1 ||
+                verdict_code !== 8'h3C || fram_state !== 2'd0)
+                fail_now("Stale FRAM readback must keep the pulse blocked");
+        end
+        fram_ready = 1'b1;
+        @(posedge clk);
         #1;
-        if (act_enable_p !== 1'b1 || act_enable_n !== 1'b0 || verdict_code !== 8'hA5 ||
-            fram_state !== 2'd1 || fram_unresolved !== 1'b1 || fram_pending_tag !== saved_pre_tag)
-            fail_now("Cycle T2 failed to latch FRAM simultaneously with pulse");
+        if (act_enable_p !== 1'b0 || fram_state !== 2'd1 ||
+            fram_unresolved !== 1'b1 || fram_pending_tag !== saved_pre_tag)
+            fail_now("FRAM must latch the pending record before the pulse");
+        @(posedge clk); // T2: release only after durable readback.
+        #1;
+        if (act_enable_p !== 1'b1 || act_enable_n !== 1'b0 || verdict_code !== 8'hA5)
+            fail_now("Matching FRAM readback did not release T2");
         len_at_cut = history_len;
 
         // Cut power MID-PULSE right inside Cycle T2!

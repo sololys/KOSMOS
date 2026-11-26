@@ -40,6 +40,26 @@ module tb_kosmos_v03_physics_gate;
     wire         [7:0] verdict_code;
     wire        [31:0] issued_pre_tag, history_len, realized_cnt, history_digest;
 
+    logic fram_valid = 1'd0;
+    logic [1:0] fram_state = 2'd0;
+    logic fram_unresolved = 1'd0;
+    logic [31:0] fram_nonce = 32'd0;
+    logic [31:0] fram_hist_len = 32'd0;
+    logic [31:0] fram_digest = 32'd0;
+    logic [31:0] fram_pending_tag = 32'd0;
+
+    always @(posedge clk) begin
+        if (por_rst_n && sys_rst_n) begin
+            fram_valid <= nvm_out_valid;
+            fram_state <= nvm_out_state;
+            fram_unresolved <= nvm_out_unresolved;
+            fram_nonce <= nvm_out_nonce;
+            fram_hist_len <= nvm_out_hist_len;
+            fram_digest <= nvm_out_digest;
+            fram_pending_tag <= nvm_out_pending_tag;
+        end
+    end
+
     kosmos_v03_physics_gate dut (
         .clk                 (clk),
         .por_rst_n           (por_rst_n),
@@ -82,13 +102,13 @@ module tb_kosmos_v03_physics_gate;
         .auth_nonce          (auth_nonce),
         .post_tether_tag     (post_tether_tag),
         .l01_challenge_sig   (l01_challenge_sig),
-        .nvm_in_valid        (1'b0),
-        .nvm_in_state        (2'd0),
-        .nvm_in_unresolved   (1'b0),
-        .nvm_in_nonce        (32'd0),
-        .nvm_in_hist_len     (32'd0),
-        .nvm_in_digest       (32'd0),
-        .nvm_in_pending_tag  (32'd0),
+        .nvm_in_valid        (fram_valid),
+        .nvm_in_state        (fram_state),
+        .nvm_in_unresolved   (fram_unresolved),
+        .nvm_in_nonce        (fram_nonce),
+        .nvm_in_hist_len     (fram_hist_len),
+        .nvm_in_digest       (fram_digest),
+        .nvm_in_pending_tag  (fram_pending_tag),
         .nvm_out_valid       (nvm_out_valid),
         .nvm_out_state       (nvm_out_state),
         .nvm_out_unresolved  (nvm_out_unresolved),
@@ -212,10 +232,18 @@ module tb_kosmos_v03_physics_gate;
         rail_p = 4'b0000; rail_n = 4'b1111;
         if (lock_state !== 2'd1 || act_enable_p !== 1'b0)
             fail_now("T1 violated WAL-before-pulse");
+        @(posedge clk); // FRAM captures the pre-commit record.
+        #1;
+        if (act_enable_p !== 1'b0 || fram_state !== 2'd1)
+            fail_now("Pulse preceded durable readback");
         @(posedge clk); // T2
         #1;
         if (act_enable_p !== 1'b1 || verdict_code !== 8'hA5)
             fail_now("T2 failed to fire pulse");
+        @(posedge clk);
+        #1;
+        if (act_enable_p !== 1'b0 || act_enable_n !== 1'b1)
+            fail_now("T2 pulse lasted more than one cycle");
 
         // 3. Optional external vector parity streaming for C11 <-> RTL XOR == 0 proof
         if ($value$plusargs("VEC_FILE=%s", vec_path) &&

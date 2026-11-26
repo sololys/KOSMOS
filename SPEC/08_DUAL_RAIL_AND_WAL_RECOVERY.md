@@ -29,17 +29,12 @@ $$\text{KILL med } (\text{unresolved\_latched} = 1) \xrightarrow{\text{L01-signa
 
 ---
 
-## 3. To-syklus `WAL-før-puls` i maskinvare
+## 3. Bekreftet `WAL-før-puls` i maskinvare
 
-For at et strømbrudd midt under selve aktuatorpulsen aldri skal kunne etterlate FRAM i gammel `STATE_HOLD`, deler `RTL/kosmos_dual_rail_gate.sv` godkjenningen over to klokkeslag:
+`RTL/kosmos_dual_rail_gate.sv` og `RTL/kosmos_v03_physics_gate.sv` holder aktuatorutgangen av mens FRAM lagrer forhåndsposten.
 
-```text
-+----------------------------------------------------------------------+
-|  Syklus T1 (Forhåndslås) : state_q <= IN_FLIGHT, act_enable_p == 0   |
-|  Posedge #2 (FRAM låst)  : FRAM fanger IN_FLIGHT + tag + auth_nonce  |
-|  Syklus T2 (Utløsning)   : act_enable_p == 1, verdict_code == 0xA5   |
-+----------------------------------------------------------------------+
-```
+1. **T1 (forhåndslås):** Gaten presenterer `IN_FLIGHT`, `unresolved = 1`, nonce, historikklengde, digest og tag på `nvm_out_*`. Utgangen er av.
+2. **Vent på FRAM:** Minnekontrolleren presenterer en gyldig `nvm_in_*`-post først etter varig lagring. Gaten venter så lenge posten mangler eller et felt avviker. Minnekontrolleren må holde posten stabil over samplingsflanken.
+3. **T2 (utløsning):** Når gaten sampler en gyldig, identisk post, utløser den én klokkesyklus med `act_enable_p = 1` og `verdict_code = 0xA5`. Crowbar har fortsatt prioritet.
 
-* **Strømbrudd i $T_1$:** `act_enable_p` har vært `0` hele tiden; ingen spenning ble sendt ut på skinna.
-* **Strømbrudd i $T_2$:** FRAM har allerede låst `STATE_IN_FLIGHT`, `unresolved = 1`, `auth_nonce` og `pending_tag` ved inngangen til $T_2$, slik at omstart garantert våkner i `STATE_UNRESOLVED` med $u = 0$.
+Ved strømbrudd før T2 har utgangen vært av. Ved strømbrudd under T2 finnes forhåndsposten allerede i FRAM, og oppstart med denne posten gir `STATE_UNRESOLVED` med utgangen av.
