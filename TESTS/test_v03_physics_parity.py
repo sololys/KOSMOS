@@ -339,7 +339,7 @@ def test_c11_rtl_xor_zero_parity(lib: ctypes.CDLL) -> None:
                 )
 
         subprocess.run(
-            ["vvp", str(vvp_bin), f"+VEC_FILE={vec_file}", f"+OUT_FILE={out_file}"],
+            ["vvp", "-N", str(vvp_bin), f"+VEC_FILE={vec_file}", f"+OUT_FILE={out_file}"],
             check=True,
             stdout=subprocess.DEVNULL,
         )

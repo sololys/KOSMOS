@@ -1,0 +1,32 @@
+name: KOSMOS Silicon & C11 Parity Gate
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Icarus Verilog, Yosys, and GCC toolchain
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq gcc iverilog yosys
+
+      - name: Run full KOSMOS v0.3 verification (C11 ASan/UBSan + RTL + Yosys + 256/256 XOR==0 + Manifest)
+        run: make verify

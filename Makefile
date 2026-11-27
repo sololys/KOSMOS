@@ -35,11 +35,11 @@ c11: build/libkosmos.so TESTS/test_core_c11.c
 rtl:
 	@mkdir -p build
 	iverilog -g2012 -Wall -o build/tb_kosmos_gate.vvp RTL/kosmos_gate.sv RTL/tb_kosmos_gate.sv
-	vvp build/tb_kosmos_gate.vvp
+	vvp -N build/tb_kosmos_gate.vvp
 	iverilog -g2012 -Wall -o build/tb_kosmos_dual_rail_gate.vvp RTL/kosmos_dual_rail_gate.sv RTL/tb_kosmos_dual_rail_gate.sv
-	vvp build/tb_kosmos_dual_rail_gate.vvp
+	vvp -N build/tb_kosmos_dual_rail_gate.vvp
 	iverilog -g2012 -Wall -o build/tb_kosmos_v03_physics_gate.vvp RTL/kosmos_v03_physics_gate.sv RTL/tb_kosmos_v03_physics_gate.sv
-	vvp build/tb_kosmos_v03_physics_gate.vvp
+	vvp -N build/tb_kosmos_v03_physics_gate.vvp
 	yosys -q -p "read_verilog -sv RTL/kosmos_gate.sv RTL/kosmos_dual_rail_gate.sv RTL/kosmos_v03_physics_gate.sv; proc; opt; check -assert; stat"
 	@echo "[PASS] Yosys synthesis check clean across all 3 RTL gates (0 latches, 0 errors)."
 
