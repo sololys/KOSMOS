@@ -277,8 +277,9 @@ module kosmos_v03_physics_gate (
         end else begin
             pulse_active_q <= 1'b0;
 
-            if (!rail_ok || any_poison || (comb_verdict == VERDICT_KILL && req_open)) begin
+            if (!rail_ok || any_poison || (comb_verdict == VERDICT_KILL)) begin
                 commit_armed_q <= 1'b0;
+                pulse_active_q <= 1'b0;
                 if ((state_q == STATE_IN_FLIGHT) || (state_q == STATE_UNRESOLVED)) begin
                     unresolved_latched_q <= 1'b1;
                 end
@@ -321,8 +322,17 @@ module kosmos_v03_physics_gate (
                     STATE_IN_FLIGHT: begin
                         if (commit_armed_q) begin
                             commit_armed_q <= 1'b0;
-                            pulse_active_q <= 1'b1;
-                            verdict_q      <= VERDICT_OPEN;
+                            if (comb_verdict == VERDICT_OPEN) begin
+                                pulse_active_q <= 1'b1;
+                                verdict_q      <= VERDICT_OPEN;
+                            end else begin
+                                pulse_active_q       <= 1'b0;
+                                state_q              <= STATE_UNRESOLVED;
+                                unresolved_latched_q <= 1'b1;
+                                verdict_q            <= (comb_verdict == VERDICT_TRAP) ? VERDICT_TRAP : VERDICT_HOLD;
+                                hist_len_q           <= hist_len_q + 32'd1;
+                                digest_q             <= crc_step(digest_q, 32'hAB07_0003);
+                            end
                         end else begin
                             verdict_q <= VERDICT_HOLD;
                             if (req_post) begin
@@ -382,7 +392,7 @@ module kosmos_v03_physics_gate (
     assign nvm_out_digest      = digest_q;
     assign nvm_out_pending_tag = pending_tag_q;
 
-    assign crowbar_trip       = (!rail_ok) || any_poison || (state_q == STATE_KILL);
+    assign crowbar_trip       = (!rail_ok) || any_poison || (comb_verdict == VERDICT_KILL) || (state_q == STATE_KILL);
     assign act_enable_p       = (!crowbar_trip) && pulse_active_q && (state_q == STATE_IN_FLIGHT) && (verdict_q == VERDICT_OPEN);
     assign act_enable_n       = ~act_enable_p;
 

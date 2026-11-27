@@ -238,8 +238,10 @@ module kosmos_dual_rail_gate (
 
             // Dual-rail symmetry breach or poison vector -> immediate latched KILL
             // WITHOUT wiping unresolved_latched_q or pending_tag_q!
-            if (!rail_ok || poison_vec) begin
+            if (!rail_ok || poison_vec || (chu_fold == CHU_CONFLICT) ||
+                (commit_armed_q && (!linf_ok || !corner_ok || !tof_ok || (chu_fold != CHU_VERIFIED)))) begin
                 commit_armed_q <= 1'b0;
+                pulse_active_q <= 1'b0;
                 if ((state_q == STATE_IN_FLIGHT) || (state_q == STATE_UNRESOLVED)) begin
                     unresolved_latched_q <= 1'b1;
                 end
@@ -347,7 +349,8 @@ module kosmos_dual_rail_gate (
     assign nvm_out_pending_tag = pending_tag_q;
 
     // 0-cycle combinational crowbar trip on dual-rail fault, poison, or latched KILL
-    assign crowbar_trip       = (!rail_ok) || poison_vec || (state_q == STATE_KILL);
+    assign crowbar_trip       = (!rail_ok) || poison_vec || (chu_fold == CHU_CONFLICT) || (state_q == STATE_KILL) ||
+                                ((commit_armed_q || pulse_active_q) && (!linf_ok || !corner_ok || !tof_ok || (chu_fold != CHU_VERIFIED)));
     assign act_enable_p       = (!crowbar_trip) && pulse_active_q && (state_q == STATE_IN_FLIGHT) && (verdict_q == VERDICT_OPEN);
     assign act_enable_n       = ~act_enable_p;
 

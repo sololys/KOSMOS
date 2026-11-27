@@ -217,6 +217,27 @@ module tb_kosmos_v03_physics_gate;
         if (act_enable_p !== 1'b1 || verdict_code !== 8'hA5)
             fail_now("T2 failed to fire pulse");
 
+        // 2B. Adversarial T2 breach: arm T1, then drop req_open=0 AND breach lightcone (dr_sq=999 > ct_sq=100) in T2!
+        por_rst_n = 1'b0; sys_rst_n = 1'b0;
+        set_clean_open_defaults();
+        @(posedge clk); #1;
+        por_rst_n = 1'b1; sys_rst_n = 1'b1;
+        @(posedge clk); #1;
+        rail_p = 4'b0001; rail_n = 4'b1110; // req_open=1
+        @(posedge clk); #1; // T1 armed
+        if (lock_state !== 2'd1 || act_enable_p !== 1'b0)
+            fail_now("T2-breach setup failed at T1");
+        rail_p = 4'b0000; rail_n = 4'b1111; // Host drops req_open=0
+        dr_sq  = 64'd999; ct_sq  = 64'd100; // Superluminal breach -> comb_verdict == VERDICT_KILL!
+        #1; // Immediate 0-cycle crowbar before T2 clock edge!
+        if (comb_verdict !== 8'h00 || crowbar_trip !== 1'b1 || act_enable_p !== 1'b0 || verdict_code !== 8'h00)
+            fail_now("T2 lightcone breach with req_open=0 failed 0-cycle crowbar_trip");
+        @(posedge clk); #1; // T2 clock edge MUST abort pulse and latch STATE_KILL + unresolved_latched!
+        if (act_enable_p !== 1'b0 || crowbar_trip !== 1'b1 || lock_state !== 2'd3 ||
+            unresolved_latched !== 1'b1 || verdict_code !== 8'h00)
+            fail_now("T2 lightcone breach with req_open=0 fired pulse instead of latching STATE_KILL");
+        set_clean_open_defaults();
+
         // 3. Optional external vector parity streaming for C11 <-> RTL XOR == 0 proof
         if ($value$plusargs("VEC_FILE=%s", vec_path) &&
             $value$plusargs("OUT_FILE=%s", out_path)) begin

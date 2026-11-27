@@ -305,6 +305,23 @@ module tb_kosmos_dual_rail_gate;
         if (lock_state !== 2'd0 || unresolved_latched !== 1'b0 || issued_pre_tag !== 32'd0)
             fail_now("Dedicated second L01 signature failed to clear STATE_UNRESOLVED to STATE_HOLD");
 
+        // 5. Adversarial Cycle-T2 Envelope Breach (req_open=0 while commit_armed_q=1 and tof_ok/linf_ok breaks)
+        auth_nonce  = 32'd2;
+        tof_meas_ps = 32'd133425;
+        vec_x       = 16'sd50;
+        set_cmd(4'b0001); // req_open=1
+        @(posedge clk); #1; // T1 armed
+        if (lock_state !== 2'd1 || act_enable_p !== 1'b0)
+            fail_now("Test 5 failed to arm T1");
+        set_cmd(4'b0000); // Drop req_open=0 in T2
+        vec_x = 16'sd120; // Break linf_ok (120 > 100) right before T2 pulse!
+        #1;
+        if (crowbar_trip !== 1'b1 || act_enable_p !== 1'b0 || verdict_code !== 8'h00)
+            fail_now("Cycle-T2 linf breach failed 0-cycle crowbar_trip");
+        @(posedge clk); #1;
+        if (act_enable_p !== 1'b0 || lock_state !== 2'd3 || unresolved_latched !== 1'b1 || crowbar_trip !== 1'b1)
+            fail_now("Cycle-T2 linf breach failed to abort pulse and latch STATE_KILL");
+
         $display("[PASS] RTL kosmos_dual_rail_gate v0.2.1: WAL-before-pulse, sticky FRAM UNRESOLVED across KILL, ToF, corner, and 0-cycle crowbar verified (hist=%0d).",
                  history_len);
         $finish(0);

@@ -1,25 +1,30 @@
 /*
- * KOSMOS v0.2.1 — Cold-Boot fsync WAL, Torn-Tail Quarantine & Signed L01
+ * KOSMOS v0.3.1 — Cold-Boot fsync WAL, Torn-Tail Quarantine, Signed L01 & flock
  * CORE/kosmos_wal.c (0 float, 0 heap)
  *
- * Hardened against Round-2 adversarial findings:
- *   1. Replays ALL intact 128B prefix frames BEFORE handling any torn tail,
- *      preserving last_nonce, history prefix, and any unresolved PRE state.
- *   2. Never truncates or overwrites torn tail bytes: forward-pads the torn
- *      128B physical slot with 0xEE and appends a version-2 quarantine KILL
+ * Hardened against Round-2 & SPRIND review findings:
+ *   1. Exclusive flock(fd, LOCK_EX) wraps the entire read-index-compute-write-fsync
+ *      cycle across cold-boot, authorize, confirm_post, and signed L01 recovery.
+ *   2. Syncs any newly committed intact 128B frames from the locked WAL file so
+ *      logical index, head_hash, and last_nonce come from true on-disk state rather
+ *      than stale in-memory counters across multi-process writers.
+ *   3. Never truncates or overwrites torn tail bytes: forward-pads the torn
+ *      128B physical slot with 0xEE and appends a version-2 KTRN quarantine KILL
  *      certificate whose payload_hash = SHA256(padded_torn_slot).
- *   3. Preserves sticky unresolved_latched across KILL so clearing a torn-WAL
+ *   4. Preserves sticky unresolved_latched across KILL so clearing a torn-WAL
  *      or fault KILL steps down to STATE_UNRESOLVED if a prior PRE lacked POST.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
 
+#define _DEFAULT_SOURCE
 #define _POSIX_C_SOURCE 200809L
 
 #include "kosmos_v02.h"
 #include "kosmos_sha256.h"
 #include <fcntl.h>
 #include <string.h>
+#include <sys/file.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
@@ -145,63 +150,45 @@ static void encode_wal_frame_ver(const kosmos_ledger_entry_t *e,
     memcpy(&frame[99], seal, 29u);
 }
 
-static int write_all_fsync(const char *wal_path, const uint8_t *buf, size_t len) {
+static int open_locked_wal(const char *wal_path) {
     int fd;
-    size_t off = 0u;
     if (wal_path == NULL) {
         return -1;
     }
-    fd = open(wal_path, O_WRONLY | O_CREAT | O_APPEND, 0600);
+    fd = open(wal_path, O_RDWR | O_CREAT, 0600);
     if (fd < 0) {
+        return -1;
+    }
+    if (flock(fd, LOCK_EX) != 0) {
+        (void)close(fd);
+        return -1;
+    }
+    return fd;
+}
+
+static void close_locked_wal(int fd) {
+    if (fd >= 0) {
+        (void)flock(fd, LOCK_UN);
+        (void)close(fd);
+    }
+}
+
+static int write_fd_all_fsync(int fd, const uint8_t *buf, size_t len) {
+    size_t off = 0u;
+    if (fd < 0 || lseek(fd, 0, SEEK_END) < 0) {
         return -1;
     }
     while (off < len) {
         ssize_t n = write(fd, buf + off, len - off);
         if (n <= 0) {
-            (void)close(fd);
             return -1;
         }
         off += (size_t)n;
     }
     if (fsync(fd) != 0) {
-        (void)close(fd);
-        return -1;
-    }
-    if (close(fd) != 0) {
         return -1;
     }
     return 0;
-}
-
-static kosmos_status_t check_wal_aligned(const char *wal_path) {
-    struct stat st_buf;
-    if (wal_path == NULL) {
-        return KOSMOS_ERR_NULL;
-    }
-    if (stat(wal_path, &st_buf) != 0) {
-        return KOSMOS_OK;
-    }
-    if (st_buf.st_size < 0 || (((size_t)st_buf.st_size % KOSMOS_WAL_RECORD_SIZE) != 0u)) {
-        return KOSMOS_ERR_TAMPER;
-    }
-    return KOSMOS_OK;
-}
-
-static kosmos_status_t append_wal_entries_from(const kosmos_gate_t *gate,
-                                               const char *wal_path,
-                                               uint32_t start_idx) {
-    uint32_t i;
-    if (check_wal_aligned(wal_path) != KOSMOS_OK) {
-        return KOSMOS_ERR_TAMPER;
-    }
-    for (i = start_idx; i < gate->history.len; ++i) {
-        uint8_t frame[KOSMOS_WAL_RECORD_SIZE];
-        encode_wal_frame_ver(&gate->history.entries[i], gate->last_nonce, 1u, frame);
-        if (write_all_fsync(wal_path, frame, sizeof(frame)) != 0) {
-            return KOSMOS_ERR_CAPACITY;
-        }
-    }
-    return KOSMOS_OK;
 }
 
 static int read_exact(int fd, uint8_t *buf, size_t len) {
@@ -247,14 +234,172 @@ static void track_entry_effects(kosmos_gate_t *gate,
             gate->unresolved_latched = 1u;
         }
     } else if (e->symbol == (uint8_t)KOSMOS_EVT_L01_RECOVERY) {
-        /* If recovery followed KILL while an OPEN was unresolved, first recovery
-         * leaves open_still_pending active unless already in UNRESOLVED */
         if (gate->state == (uint32_t)KOSMOS_STATE_UNRESOLVED) {
             *open_still_pending = 0u;
             gate->unresolved_latched = 0u;
             memset(gate->pending_pre_hash, 0, sizeof(gate->pending_pre_hash));
         }
     }
+}
+
+/* Under an already-held LOCK_EX fd, replay/sync intact on-disk WAL into gate so
+ * gate->history.len, head_hash, last_nonce, last_cycle, and state reflect true disk state. */
+static kosmos_status_t sync_gate_from_locked_fd(kosmos_gate_t *gate,
+                                                int fd,
+                                                uint8_t *open_pending_out,
+                                                kosmos_ledger_entry_t *last_open_out) {
+    struct stat st_buf;
+    size_t file_bytes;
+    size_t full_blocks;
+    size_t b = 0u;
+    uint32_t logical_idx = 0u;
+    uint8_t open_pending = 0u;
+    kosmos_ledger_entry_t last_open;
+    kosmos_linf_box_t saved_hard = gate->hard_box;
+    kosmos_linf_box_t saved_cand = gate->cand_box;
+    uint32_t saved_min_wit = gate->min_witnesses;
+
+    memset(&last_open, 0, sizeof(last_open));
+    if (fstat(fd, &st_buf) != 0 || st_buf.st_size < 0) {
+        gate->state = (uint32_t)KOSMOS_STATE_KILL;
+        return KOSMOS_ERR_TAMPER;
+    }
+    file_bytes = (size_t)st_buf.st_size;
+    if ((file_bytes % KOSMOS_WAL_RECORD_SIZE) != 0u) {
+        gate->state = (uint32_t)KOSMOS_STATE_KILL;
+        return KOSMOS_ERR_TAMPER;
+    }
+    if (file_bytes == 0u) {
+        if (open_pending_out != NULL) { *open_pending_out = 0u; }
+        return KOSMOS_OK;
+    }
+    if (lseek(fd, 0, SEEK_SET) < 0) {
+        gate->state = (uint32_t)KOSMOS_STATE_KILL;
+        return KOSMOS_ERR_TAMPER;
+    }
+
+    memset(gate, 0, sizeof(*gate));
+    gate->hard_box = saved_hard;
+    gate->cand_box = saved_cand;
+    gate->min_witnesses = saved_min_wit;
+    gate->state = (uint32_t)KOSMOS_STATE_HOLD;
+
+    full_blocks = file_bytes / KOSMOS_WAL_RECORD_SIZE;
+    while (b < full_blocks) {
+        uint8_t frame[KOSMOS_WAL_RECORD_SIZE];
+        kosmos_ledger_entry_t *e;
+        uint32_t idx_wire;
+        uint64_t nonce_wire;
+
+        if (logical_idx >= KOSMOS_HISTORY_CAP) {
+            gate->state = (uint32_t)KOSMOS_STATE_KILL;
+            return KOSMOS_ERR_CAPACITY;
+        }
+        if (read_exact(fd, frame, KOSMOS_WAL_RECORD_SIZE) != 0) {
+            gate->state = (uint32_t)KOSMOS_STATE_KILL;
+            return KOSMOS_ERR_TAMPER;
+        }
+        if (!is_valid_kwal_frame(frame, 1u)) {
+            if ((b + 1u) < full_blocks) {
+                uint8_t cert[KOSMOS_WAL_RECORD_SIZE];
+                uint8_t torn_hash[32];
+                if (read_exact(fd, cert, KOSMOS_WAL_RECORD_SIZE) != 0 || !is_valid_kwal_frame(cert, 2u)) {
+                    gate->state = (uint32_t)KOSMOS_STATE_KILL;
+                    return KOSMOS_ERR_TAMPER;
+                }
+                kosmos_sha256_oneshot(frame, KOSMOS_WAL_RECORD_SIZE, torn_hash);
+                if (memcmp(&cert[32], torn_hash, 32u) != 0) {
+                    gate->state = (uint32_t)KOSMOS_STATE_KILL;
+                    return KOSMOS_ERR_TAMPER;
+                }
+                memcpy(frame, cert, KOSMOS_WAL_RECORD_SIZE);
+                b += 2u;
+            } else {
+                if (open_pending != 0u) { gate->unresolved_latched = 1u; }
+                gate->state = (uint32_t)KOSMOS_STATE_KILL;
+                return KOSMOS_ERR_TAMPER;
+            }
+        } else {
+            b += 1u;
+        }
+
+        idx_wire = ((uint32_t)frame[4] << 24u) |
+                   ((uint32_t)frame[5] << 16u) |
+                   ((uint32_t)frame[6] << 8u) |
+                   ((uint32_t)frame[7]);
+        if (idx_wire != logical_idx) {
+            if (open_pending != 0u) { gate->unresolved_latched = 1u; }
+            gate->state = (uint32_t)KOSMOS_STATE_KILL;
+            return KOSMOS_ERR_TAMPER;
+        }
+
+        nonce_wire = get_be64(&frame[24]);
+        if (nonce_wire < gate->last_nonce) {
+            gate->state = (uint32_t)KOSMOS_STATE_KILL;
+            return KOSMOS_ERR_TAMPER;
+        }
+        gate->last_nonce = nonce_wire;
+
+        e = &gate->history.entries[logical_idx];
+        memset(e, 0, sizeof(*e));
+        e->index = (uint64_t)logical_idx;
+        e->cycle = get_be64(&frame[8]);
+        e->witness_id = get_be64(&frame[16]);
+        e->symbol = frame[97];
+        e->verdict = frame[98];
+        if (logical_idx > 0u) {
+            memcpy(e->prev_hash, gate->history.entries[logical_idx - 1u].entry_hash, 32u);
+        }
+        memcpy(e->payload_hash, &frame[32], 32u);
+        memcpy(e->entry_hash, &frame[64], 32u);
+
+        gate->history.symbols[logical_idx] = e->symbol;
+        memcpy(gate->history.head_hash, e->entry_hash, 32u);
+        gate->history.len = logical_idx + 1u;
+        gate->last_cycle = e->cycle;
+
+        track_entry_effects(gate, e, &last_open, &open_pending);
+        if (e->symbol == (uint8_t)KOSMOS_EVT_HARD_KILL) {
+            gate->state = (uint32_t)KOSMOS_STATE_KILL;
+        } else if (e->symbol == (uint8_t)KOSMOS_EVT_OPEN_AUTHORIZED) {
+            gate->state = (uint32_t)KOSMOS_STATE_IN_FLIGHT;
+            gate->open_cycle = e->cycle;
+        } else if (e->symbol == (uint8_t)KOSMOS_EVT_POST_REALIZED) {
+            gate->state = (uint32_t)KOSMOS_STATE_HOLD;
+            gate->open_cycle = 0u;
+        } else if (e->symbol == (uint8_t)KOSMOS_EVT_OUTCOME_UNRESOLVED) {
+            gate->state = (uint32_t)KOSMOS_STATE_UNRESOLVED;
+        } else if (e->symbol == (uint8_t)KOSMOS_EVT_L01_RECOVERY) {
+            if (gate->state == (uint32_t)KOSMOS_STATE_KILL && gate->unresolved_latched != 0u) {
+                gate->state = (uint32_t)KOSMOS_STATE_UNRESOLVED;
+            } else {
+                gate->state = (uint32_t)KOSMOS_STATE_HOLD;
+            }
+        }
+        logical_idx += 1u;
+    }
+
+    if (gate->history.len > 0u && kosmos_history_verify_chain(&gate->history) != KOSMOS_OK) {
+        gate->state = (uint32_t)KOSMOS_STATE_KILL;
+        return KOSMOS_ERR_TAMPER;
+    }
+    if (open_pending_out != NULL) { *open_pending_out = open_pending; }
+    if (last_open_out != NULL) { *last_open_out = last_open; }
+    return KOSMOS_OK;
+}
+
+static kosmos_status_t append_wal_entries_locked(int fd,
+                                                 const kosmos_gate_t *gate,
+                                                 uint32_t start_idx) {
+    uint32_t i;
+    for (i = start_idx; i < gate->history.len; ++i) {
+        uint8_t frame[KOSMOS_WAL_RECORD_SIZE];
+        encode_wal_frame_ver(&gate->history.entries[i], gate->last_nonce, 1u, frame);
+        if (write_fd_all_fsync(fd, frame, sizeof(frame)) != 0) {
+            return KOSMOS_ERR_CAPACITY;
+        }
+    }
+    return KOSMOS_OK;
 }
 
 kosmos_status_t kosmos_gate_cold_boot(kosmos_gate_t *gate,
@@ -303,36 +448,32 @@ kosmos_status_t kosmos_gate_cold_boot(kosmos_gate_t *gate,
     gate->hard_box = *hard_box;
     gate->cand_box = *cand_box;
 
-    fd = open(wal_path, O_RDONLY);
+    /* Acquire exclusive file lock across cold-boot creation / replay / torn quarantine */
+    fd = open_locked_wal(wal_path);
     if (fd < 0) {
-        st = kosmos_gate_init(gate, hard_box, cand_box, min_witnesses, boot_cycle);
-        if (st != KOSMOS_OK) {
-            return st;
-        }
-        return append_wal_entries_from(gate, wal_path, 0u);
+        gate->state = (uint32_t)KOSMOS_STATE_KILL;
+        return KOSMOS_ERR_CAPACITY;
     }
 
     if (fstat(fd, &st_buf) != 0 || st_buf.st_size < 0) {
-        (void)close(fd);
+        close_locked_wal(fd);
         gate->state = (uint32_t)KOSMOS_STATE_KILL;
         return KOSMOS_ERR_TAMPER;
     }
 
     file_bytes = (size_t)st_buf.st_size;
     if (file_bytes == 0u) {
-        (void)close(fd);
         st = kosmos_gate_init(gate, hard_box, cand_box, min_witnesses, boot_cycle);
-        if (st != KOSMOS_OK) {
-            return st;
+        if (st == KOSMOS_OK) {
+            st = append_wal_entries_locked(fd, gate, 0u);
         }
-        return append_wal_entries_from(gate, wal_path, 0u);
+        close_locked_wal(fd);
+        return st;
     }
 
     full_blocks = file_bytes / KOSMOS_WAL_RECORD_SIZE;
     rem_bytes = file_bytes % KOSMOS_WAL_RECORD_SIZE;
 
-    /* Step 1: Always replay all valid complete 128-byte blocks FIRST so last_nonce
-     * and history prefix are preserved in RAM even when the tail is torn! */
     b = 0u;
     while (b < full_blocks) {
         uint8_t frame[KOSMOS_WAL_RECORD_SIZE];
@@ -341,36 +482,35 @@ kosmos_status_t kosmos_gate_cold_boot(kosmos_gate_t *gate,
         uint64_t nonce_wire;
 
         if (logical_idx >= KOSMOS_HISTORY_CAP) {
-            (void)close(fd);
+            close_locked_wal(fd);
             gate->state = (uint32_t)KOSMOS_STATE_KILL;
             return KOSMOS_ERR_CAPACITY;
         }
         if (read_exact(fd, frame, KOSMOS_WAL_RECORD_SIZE) != 0) {
-            (void)close(fd);
+            close_locked_wal(fd);
             gate->state = (uint32_t)KOSMOS_STATE_KILL;
             return KOSMOS_ERR_TAMPER;
         }
 
         if (!is_valid_kwal_frame(frame, 1u)) {
-            /* Check if block b was a previously padded torn slot followed by a KTRN v2 certificate at b+1 */
             if ((b + 1u) < full_blocks) {
                 uint8_t cert[KOSMOS_WAL_RECORD_SIZE];
                 uint8_t torn_hash[32];
                 if (read_exact(fd, cert, KOSMOS_WAL_RECORD_SIZE) != 0 || !is_valid_kwal_frame(cert, 2u)) {
-                    (void)close(fd);
+                    close_locked_wal(fd);
                     gate->state = (uint32_t)KOSMOS_STATE_KILL;
                     return KOSMOS_ERR_TAMPER;
                 }
                 kosmos_sha256_oneshot(frame, KOSMOS_WAL_RECORD_SIZE, torn_hash);
                 if (memcmp(&cert[32], torn_hash, 32u) != 0) {
-                    (void)close(fd);
+                    close_locked_wal(fd);
                     gate->state = (uint32_t)KOSMOS_STATE_KILL;
                     return KOSMOS_ERR_TAMPER;
                 }
                 memcpy(frame, cert, KOSMOS_WAL_RECORD_SIZE);
                 b += 2u;
             } else {
-                (void)close(fd);
+                close_locked_wal(fd);
                 if (open_pending != 0u) {
                     gate->unresolved_latched = 1u;
                 }
@@ -386,7 +526,7 @@ kosmos_status_t kosmos_gate_cold_boot(kosmos_gate_t *gate,
                    ((uint32_t)frame[6] << 8u) |
                    ((uint32_t)frame[7]);
         if (idx_wire != logical_idx) {
-            (void)close(fd);
+            close_locked_wal(fd);
             if (open_pending != 0u) {
                 gate->unresolved_latched = 1u;
             }
@@ -396,7 +536,7 @@ kosmos_status_t kosmos_gate_cold_boot(kosmos_gate_t *gate,
 
         nonce_wire = get_be64(&frame[24]);
         if (nonce_wire < gate->last_nonce) {
-            (void)close(fd);
+            close_locked_wal(fd);
             gate->state = (uint32_t)KOSMOS_STATE_KILL;
             return KOSMOS_ERR_TAMPER;
         }
@@ -435,14 +575,13 @@ kosmos_status_t kosmos_gate_cold_boot(kosmos_gate_t *gate,
         logical_idx += 1u;
     }
 
-    /* Verify cryptographic integrity of the replayed intact prefix */
     if (gate->history.len > 0u && kosmos_history_verify_chain(&gate->history) != KOSMOS_OK) {
-        (void)close(fd);
+        close_locked_wal(fd);
         gate->state = (uint32_t)KOSMOS_STATE_KILL;
         return KOSMOS_ERR_TAMPER;
     }
 
-    /* Step 2: Handle torn partial tail (1..127 bytes) WITHOUT truncating or losing last_nonce! */
+    /* Handle torn partial tail (1..127 bytes) atomically under LOCK_EX */
     if (rem_bytes != 0u) {
         uint8_t torn_slot[KOSMOS_WAL_RECORD_SIZE];
         uint8_t torn_hash[32];
@@ -453,11 +592,10 @@ kosmos_status_t kosmos_gate_cold_boot(kosmos_gate_t *gate,
 
         memset(torn_slot, 0xEE, sizeof(torn_slot));
         if (read_exact(fd, torn_slot, rem_bytes) != 0) {
-            (void)close(fd);
+            close_locked_wal(fd);
             gate->state = (uint32_t)KOSMOS_STATE_KILL;
             return KOSMOS_ERR_TAMPER;
         }
-        (void)close(fd);
 
         if (open_pending != 0u) {
             gate->unresolved_latched = 1u;
@@ -474,7 +612,7 @@ kosmos_status_t kosmos_gate_cold_boot(kosmos_gate_t *gate,
                                   eff_boot,
                                   (uint8_t)KOSMOS_EVT_HARD_KILL,
                                   KOSMOS_VERDICT_KILL,
-                                  0x544F524E57414C21ULL, /* "TORNWAL!" */
+                                  0x544F524E57414C21ULL,
                                   torn_hash) == KOSMOS_OK) {
             encode_wal_frame_ver(&gate->history.entries[gate->history.len - 1u],
                                  gate->last_nonce,
@@ -482,17 +620,16 @@ kosmos_status_t kosmos_gate_cold_boot(kosmos_gate_t *gate,
                                  cert_frame);
             memcpy(&append_buf[0], &torn_slot[rem_bytes], pad_len);
             memcpy(&append_buf[pad_len], cert_frame, KOSMOS_WAL_RECORD_SIZE);
-            (void)write_all_fsync(wal_path, append_buf, pad_len + KOSMOS_WAL_RECORD_SIZE);
+            (void)write_fd_all_fsync(fd, append_buf, pad_len + KOSMOS_WAL_RECORD_SIZE);
         }
 
+        close_locked_wal(fd);
         gate->last_cycle = eff_boot;
         gate->state = (uint32_t)KOSMOS_STATE_KILL;
         return KOSMOS_ERR_TAMPER;
     }
 
-    (void)close(fd);
-
-    /* Step 3: Intact aligned WAL — inspect terminal entry */
+    /* Intact aligned WAL — inspect terminal entry while still holding LOCK_EX */
     {
         const kosmos_ledger_entry_t *last = &gate->history.entries[gate->history.len - 1u];
         uint64_t eff_boot = (boot_cycle > gate->last_cycle) ? boot_cycle : (gate->last_cycle + 1u);
@@ -508,12 +645,14 @@ kosmos_status_t kosmos_gate_cold_boot(kosmos_gate_t *gate,
         }
 
         if (last->symbol == (uint8_t)KOSMOS_EVT_HARD_KILL) {
+            close_locked_wal(fd);
             gate->state = (uint32_t)KOSMOS_STATE_KILL;
             gate->last_cycle = eff_boot;
             return KOSMOS_OK;
         }
         if (last->symbol == (uint8_t)KOSMOS_EVT_OUTCOME_UNRESOLVED ||
             (last->symbol == (uint8_t)KOSMOS_EVT_L01_RECOVERY && gate->unresolved_latched != 0u)) {
+            close_locked_wal(fd);
             gate->state = (uint32_t)KOSMOS_STATE_UNRESOLVED;
             gate->last_cycle = eff_boot;
             return KOSMOS_OK;
@@ -530,16 +669,20 @@ kosmos_status_t kosmos_gate_cold_boot(kosmos_gate_t *gate,
                                        last->witness_id,
                                        last->payload_hash);
             if (st != KOSMOS_OK) {
+                close_locked_wal(fd);
                 gate->state = (uint32_t)KOSMOS_STATE_KILL;
                 return st;
             }
-            return append_wal_entries_from(gate, wal_path, prev_len);
+            st = append_wal_entries_locked(fd, gate, prev_len);
+            close_locked_wal(fd);
+            return st;
         }
 
         gate->state = (uint32_t)KOSMOS_STATE_HOLD;
         gate->last_cycle = eff_boot;
     }
 
+    close_locked_wal(fd);
     return KOSMOS_OK;
 }
 
@@ -551,26 +694,47 @@ kosmos_status_t kosmos_wal_authorize(kosmos_gate_t *gate,
                                      kosmos_witness_pre_t *w_pre,
                                      kosmos_ctrl_t *u_out,
                                      uint8_t *verdict_out) {
+    int fd;
     uint32_t prev_len;
+    kosmos_status_t sync_st;
     kosmos_status_t st;
     kosmos_status_t wst;
 
     if (gate == NULL || wal_path == NULL) {
         return KOSMOS_ERR_NULL;
     }
+    fd = open_locked_wal(wal_path);
+    if (fd < 0) {
+        if (u_out != NULL) { memset(u_out, 0, sizeof(*u_out)); }
+        if (verdict_out != NULL) { *verdict_out = KOSMOS_VERDICT_KILL; }
+        gate->state = (uint32_t)KOSMOS_STATE_KILL;
+        return KOSMOS_ERR_CAPACITY;
+    }
+
+    /* Sync true on-disk logical index & head_hash under LOCK_EX before computing entry */
+    sync_st = sync_gate_from_locked_fd(gate, fd, NULL, NULL);
+    if (sync_st != KOSMOS_OK) {
+        close_locked_wal(fd);
+        if (u_out != NULL) { memset(u_out, 0, sizeof(*u_out)); }
+        if (verdict_out != NULL) { *verdict_out = KOSMOS_VERDICT_KILL; }
+        return sync_st;
+    }
+
     prev_len = gate->history.len;
     st = kosmos_gate_authorize(gate, hard_meas, cand_phase, cand_ctrl, w_pre, u_out, verdict_out);
 
     if (gate->history.len > prev_len) {
-        wst = append_wal_entries_from(gate, wal_path, prev_len);
+        wst = append_wal_entries_locked(fd, gate, prev_len);
         if (wst != KOSMOS_OK) {
-            memset(u_out, 0, sizeof(*u_out));
+            close_locked_wal(fd);
+            if (u_out != NULL) { memset(u_out, 0, sizeof(*u_out)); }
             memset(&gate->active_u, 0, sizeof(gate->active_u));
             gate->state = (uint32_t)KOSMOS_STATE_KILL;
-            *verdict_out = KOSMOS_VERDICT_KILL;
+            if (verdict_out != NULL) { *verdict_out = KOSMOS_VERDICT_KILL; }
             return wst;
         }
     }
+    close_locked_wal(fd);
     return st;
 }
 
@@ -578,24 +742,42 @@ kosmos_status_t kosmos_wal_confirm_post(kosmos_gate_t *gate,
                                         const char *wal_path,
                                         const kosmos_witness_post_t *w_post,
                                         uint8_t *verdict_out) {
+    int fd;
     uint32_t prev_len;
+    kosmos_status_t sync_st;
     kosmos_status_t st;
     kosmos_status_t wst;
 
     if (gate == NULL || wal_path == NULL) {
         return KOSMOS_ERR_NULL;
     }
+    fd = open_locked_wal(wal_path);
+    if (fd < 0) {
+        gate->state = (uint32_t)KOSMOS_STATE_KILL;
+        if (verdict_out != NULL) { *verdict_out = KOSMOS_VERDICT_KILL; }
+        return KOSMOS_ERR_CAPACITY;
+    }
+
+    sync_st = sync_gate_from_locked_fd(gate, fd, NULL, NULL);
+    if (sync_st != KOSMOS_OK) {
+        close_locked_wal(fd);
+        if (verdict_out != NULL) { *verdict_out = KOSMOS_VERDICT_KILL; }
+        return sync_st;
+    }
+
     prev_len = gate->history.len;
     st = kosmos_gate_confirm_post(gate, w_post, verdict_out);
 
     if (gate->history.len > prev_len) {
-        wst = append_wal_entries_from(gate, wal_path, prev_len);
+        wst = append_wal_entries_locked(fd, gate, prev_len);
         if (wst != KOSMOS_OK) {
+            close_locked_wal(fd);
             gate->state = (uint32_t)KOSMOS_STATE_KILL;
-            *verdict_out = KOSMOS_VERDICT_KILL;
+            if (verdict_out != NULL) { *verdict_out = KOSMOS_VERDICT_KILL; }
             return wst;
         }
     }
+    close_locked_wal(fd);
     return st;
 }
 
@@ -605,8 +787,10 @@ kosmos_status_t kosmos_wal_l01_recover_signed(kosmos_gate_t *gate,
                                               const uint8_t sig32[32],
                                               uint64_t cycle,
                                               uint8_t *verdict_out) {
+    int fd;
     uint8_t expected_sig[32];
     uint32_t prev_len;
+    kosmos_status_t sync_st;
     kosmos_status_t st;
     kosmos_status_t wst;
 
@@ -616,11 +800,21 @@ kosmos_status_t kosmos_wal_l01_recover_signed(kosmos_gate_t *gate,
     if (gate == NULL || wal_path == NULL || key32 == NULL || sig32 == NULL || verdict_out == NULL) {
         return KOSMOS_ERR_NULL;
     }
-    if (check_wal_aligned(wal_path) != KOSMOS_OK) {
+
+    fd = open_locked_wal(wal_path);
+    if (fd < 0) {
         gate->state = (uint32_t)KOSMOS_STATE_KILL;
-        return KOSMOS_ERR_TAMPER;
+        return KOSMOS_ERR_CAPACITY;
     }
+
+    sync_st = sync_gate_from_locked_fd(gate, fd, NULL, NULL);
+    if (sync_st != KOSMOS_OK) {
+        close_locked_wal(fd);
+        return sync_st;
+    }
+
     if (cycle <= gate->last_cycle) {
+        close_locked_wal(fd);
         *verdict_out = (gate->state == (uint32_t)KOSMOS_STATE_KILL)
                            ? KOSMOS_VERDICT_KILL
                            : KOSMOS_VERDICT_HOLD;
@@ -630,6 +824,7 @@ kosmos_status_t kosmos_wal_l01_recover_signed(kosmos_gate_t *gate,
     kosmos_l01_sign_challenge(key32, gate->history.head_hash, cycle, gate->state, expected_sig);
     if (!ct_memeq_32(expected_sig, sig32)) {
         memset(expected_sig, 0, sizeof(expected_sig));
+        close_locked_wal(fd);
         *verdict_out = (gate->state == (uint32_t)KOSMOS_STATE_KILL)
                            ? KOSMOS_VERDICT_KILL
                            : KOSMOS_VERDICT_HOLD;
@@ -647,13 +842,15 @@ kosmos_status_t kosmos_wal_l01_recover_signed(kosmos_gate_t *gate,
                                0x4C30315349474E44ULL,
                                sig32);
     if (st != KOSMOS_OK) {
+        close_locked_wal(fd);
         gate->state = (uint32_t)KOSMOS_STATE_KILL;
         *verdict_out = KOSMOS_VERDICT_KILL;
         return st;
     }
 
-    wst = append_wal_entries_from(gate, wal_path, prev_len);
+    wst = append_wal_entries_locked(fd, gate, prev_len);
     if (wst != KOSMOS_OK) {
+        close_locked_wal(fd);
         gate->state = (uint32_t)KOSMOS_STATE_KILL;
         *verdict_out = KOSMOS_VERDICT_KILL;
         return wst;
@@ -661,7 +858,6 @@ kosmos_status_t kosmos_wal_l01_recover_signed(kosmos_gate_t *gate,
 
     gate->last_cycle = cycle;
     if (gate->state == (uint32_t)KOSMOS_STATE_KILL && gate->unresolved_latched != 0u) {
-        /* Step down from KILL -> UNRESOLVED first so unresolved PRE is never wiped by a fault */
         gate->state = (uint32_t)KOSMOS_STATE_UNRESOLVED;
     } else {
         gate->unresolved_latched = 0u;
@@ -669,5 +865,6 @@ kosmos_status_t kosmos_wal_l01_recover_signed(kosmos_gate_t *gate,
         gate->state = (uint32_t)KOSMOS_STATE_HOLD;
     }
     *verdict_out = KOSMOS_VERDICT_HOLD;
+    close_locked_wal(fd);
     return KOSMOS_OK;
 }

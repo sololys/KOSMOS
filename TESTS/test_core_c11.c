@@ -5,6 +5,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+#define _DEFAULT_SOURCE
 #define _POSIX_C_SOURCE 200809L
 
 #include "kosmos_space.h"
@@ -13,6 +14,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 #define ASSERT_TRUE(cond, msg)                                                   \
@@ -259,7 +261,111 @@ static void test_v02_cold_boot_and_hmac(void) {
     (void)unlink(wal_path);
 }
 
+
+static void test_concurrent_two_process_wal_flock(void) {
+    char wal_path[] = "/tmp/kosmos_mp_wal_XXXXXX";
+    int tmp_fd = mkstemp(wal_path);
+    kosmos_linf_box_t hbox;
+    kosmos_linf_box_t cbox;
+    uint32_t i;
+    pid_t pid;
+
+    ASSERT_TRUE(tmp_fd >= 0, "mkstemp mp_wal failed");
+    (void)close(tmp_fd);
+    (void)unlink(wal_path);
+
+    memset(&hbox, 0, sizeof(hbox));
+    memset(&cbox, 0, sizeof(cbox));
+    hbox.count = 6u;
+    cbox.count = 6u;
+    for (i = 0u; i < 6u; ++i) {
+        hbox.tol[i] = 1000;
+        cbox.tol[i] = 500;
+    }
+
+    /* 1. Two concurrent processes race on kosmos_gate_cold_boot() against empty wal_path */
+    pid = fork();
+    ASSERT_TRUE(pid >= 0, "fork failed");
+    if (pid == 0) {
+        kosmos_gate_t g_child;
+        uint8_t had_unres = 0u;
+        kosmos_status_t st = kosmos_gate_cold_boot(&g_child, wal_path, &hbox, &cbox, 1u, 10u, &had_unres, NULL);
+        if (st != KOSMOS_OK) {
+            _exit(2);
+        }
+        _exit(0);
+    }
+    {
+        kosmos_gate_t g_parent;
+        uint8_t had_unres = 0u;
+        int wstatus = 0;
+        kosmos_status_t st = kosmos_gate_cold_boot(&g_parent, wal_path, &hbox, &cbox, 1u, 10u, &had_unres, NULL);
+        ASSERT_TRUE(st == KOSMOS_OK, "parent concurrent cold_boot failed");
+        ASSERT_TRUE(waitpid(pid, &wstatus, 0) == pid, "waitpid failed");
+        ASSERT_TRUE(WIFEXITED(wstatus) && WEXITSTATUS(wstatus) == 0, "child concurrent cold_boot failed");
+    }
+
+    /* 2. Two independent gate instances (both booted when len==1) append sequentially without
+     *    manual reboot: second instance syncs true on-disk logical index under flock(LOCK_EX)! */
+    {
+        kosmos_gate_t g1;
+        kosmos_gate_t g2;
+        kosmos_gate_t g_verify;
+        uint8_t had_unres = 0u;
+        uint8_t v = 0u;
+        int64_t meas[KOSMOS_GUARD_DIM] = { 0, 0, 0, 0, 0, 0 };
+        kosmos_phase_t ph = { { { 10, 20, 30 } }, { { 1, 2, 3 } } };
+        kosmos_ctrl_t ctrl = { { 5, 5, 5 } };
+        kosmos_ctrl_t u_out;
+        kosmos_witness_pre_t pre1;
+        kosmos_witness_post_t post1;
+        kosmos_witness_pre_t pre2;
+        kosmos_witness_post_t post2;
+
+        ASSERT_TRUE(kosmos_gate_cold_boot(&g1, wal_path, &hbox, &cbox, 1u, 11u, &had_unres, NULL) == KOSMOS_OK, "g1 boot");
+        ASSERT_TRUE(kosmos_gate_cold_boot(&g2, wal_path, &hbox, &cbox, 1u, 11u, &had_unres, NULL) == KOSMOS_OK, "g2 boot");
+        ASSERT_TRUE(g1.history.len == 1u && g2.history.len == 1u, "expected single genesis frame after race");
+
+        memset(&pre1, 0, sizeof(pre1));
+        pre1.witness_id = 101u;
+        pre1.auth_nonce = 1u;
+        pre1.cycle = 20u;
+        pre1.witness_count = 1u;
+        pre1.chu_rows[0] = (uint8_t)KOSMOS_CHU_VERIFIED;
+        ASSERT_TRUE(kosmos_wal_authorize(&g1, wal_path, meas, &ph, &ctrl, &pre1, &u_out, &v) == KOSMOS_OK, "g1 auth");
+        memset(&post1, 0, sizeof(post1));
+        post1.witness_id = 101u;
+        post1.cycle = 21u;
+        post1.outcome_ok = 1u;
+        memcpy(post1.tether_pre_hash, pre1.pre_hash, 32u);
+        ASSERT_TRUE(kosmos_wal_confirm_post(&g1, wal_path, &post1, &v) == KOSMOS_OK, "g1 post");
+
+        /* g2 still had stale len==1 in RAM; flock + locked tail sync anchors at idx 3 & 4 */
+        memset(&pre2, 0, sizeof(pre2));
+        pre2.witness_id = 202u;
+        pre2.auth_nonce = 2u;
+        pre2.cycle = 30u;
+        pre2.witness_count = 1u;
+        pre2.chu_rows[0] = (uint8_t)KOSMOS_CHU_VERIFIED;
+        ASSERT_TRUE(kosmos_wal_authorize(&g2, wal_path, meas, &ph, &ctrl, &pre2, &u_out, &v) == KOSMOS_OK, "g2 auth");
+        memset(&post2, 0, sizeof(post2));
+        post2.witness_id = 202u;
+        post2.cycle = 31u;
+        post2.outcome_ok = 1u;
+        memcpy(post2.tether_pre_hash, pre2.pre_hash, 32u);
+        ASSERT_TRUE(kosmos_wal_confirm_post(&g2, wal_path, &post2, &v) == KOSMOS_OK, "g2 post");
+
+        ASSERT_TRUE(kosmos_gate_cold_boot(&g_verify, wal_path, &hbox, &cbox, 1u, 40u, &had_unres, NULL) == KOSMOS_OK,
+                    "g_verify cold boot failed");
+        ASSERT_TRUE(g_verify.history.len == 5u, "expected 5 chained entries (0..4)");
+        ASSERT_TRUE(g_verify.realized_count == 2u, "expected 2 realized strokes");
+        ASSERT_TRUE(g_verify.state == (uint32_t)KOSMOS_STATE_HOLD, "expected HOLD after both strokes");
+    }
+    (void)unlink(wal_path);
+}
+
 int main(void) {
+    test_concurrent_two_process_wal_flock();
     test_sha256_fips_vectors();
     test_affine_and_antisymplectic_mirror();
     test_end_to_end_gate_invariants();
